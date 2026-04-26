@@ -5,7 +5,8 @@
   "main": "api-server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node api-server.js",
+    "start": "node server.js",
+    "start:all": "pm2 start ecosystem.config.js",
     "start:api": "node api-server.js",
     "start:ingest": "node ingest-server.js",
     "export:video": "node export-video.js"

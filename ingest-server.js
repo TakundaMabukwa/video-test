@@ -1,5 +1,4 @@
 const net = require('net')
-const { ensureSchema, closePool } = require('./helpers/db')
 const config = require('./helpers/config')
 const { PacketController } = require('./controllers/packet-controller')
 
@@ -7,9 +6,7 @@ const HOST = config.relayHost
 const PORT = config.relayPort
 
 async function start() {
-  console.log('Ingest startup: ensuring schema...')
-  await ensureSchema()
-  console.log('Ingest startup: schema ready')
+  console.log('Ingest startup: file-first mode ready')
 
   const packetController = new PacketController()
   console.log('Ingest startup: initializing packet controller...')
@@ -86,6 +83,7 @@ async function start() {
     }
 
     try {
+      const { closePool } = require('./helpers/db')
       await closePool()
     } catch (error) {
       console.error('Database shutdown failed:', error.message || String(error))
@@ -108,6 +106,7 @@ async function start() {
 
 start().catch(async (error) => {
   console.error('Fatal ingest startup error:', error.message || String(error))
+  const { closePool } = require('./helpers/db')
   await closePool().catch(() => {})
   process.exit(1)
 })

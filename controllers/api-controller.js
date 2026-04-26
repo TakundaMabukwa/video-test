@@ -1,4 +1,3 @@
-const { query } = require('../helpers/db')
 const { summarizeCoverageForRange } = require('../helpers/storage')
 const { readIngestStats } = require('../helpers/runtime-state')
 
@@ -69,7 +68,7 @@ class ApiController {
       const vehicleId = String(req.query?.vehicleId || '').trim()
       const fromMs = this.parseTimestampMs(from)
       const toMs = this.parseTimestampMs(to)
-      const source = String(req.query?.source || 'auto').trim().toLowerCase()
+      const source = String(req.query?.source || 'file').trim().toLowerCase()
 
       if (!from || !to || fromMs === null || toMs === null) {
         return res.status(400).json({
@@ -79,47 +78,16 @@ class ApiController {
       }
 
       let rows = []
-      let usedSource = source
+      let usedSource = 'file'
 
-      if (source === 'file' || source === 'files') {
-        rows = await summarizeCoverageForRange({ fromMs, toMs, vehicleId })
-        usedSource = 'file'
-      } else {
-        const params = [fromMs, toMs]
-        let vehicleClause = ''
-        if (vehicleId) {
-          params.push(vehicleId)
-          vehicleClause = 'AND vehicle_id = $3'
-        }
-
-        const result = await query(
-          `
-            SELECT
-              vehicle_id,
-              channel,
-              COUNT(*) AS packet_count,
-              MIN(packet_timestamp_ms) AS first_packet_timestamp_ms,
-              MAX(packet_timestamp_ms) AS last_packet_timestamp_ms,
-              TO_TIMESTAMP(MIN(packet_timestamp_ms) / 1000.0) AS first_packet_time,
-              TO_TIMESTAMP(MAX(packet_timestamp_ms) / 1000.0) AS last_packet_time
-            FROM raw_video_packets
-            WHERE packet_timestamp_ms >= $1
-              AND packet_timestamp_ms <= $2
-              ${vehicleClause}
-            GROUP BY vehicle_id, channel
-            ORDER BY packet_count DESC, last_packet_timestamp_ms DESC
-          `,
-          params,
-        )
-
-        rows = result.rows
-        usedSource = 'db'
-
-        if ((source === 'auto' || !source) && rows.length === 0) {
-          rows = await summarizeCoverageForRange({ fromMs, toMs, vehicleId })
-          usedSource = 'file'
-        }
+      if (source === 'db') {
+        return res.status(410).json({
+          success: false,
+          message: 'DB-backed packet coverage is disabled in file-first mode. Use source=file.',
+        })
       }
+
+      rows = await summarizeCoverageForRange({ fromMs, toMs, vehicleId })
 
       return res.status(200).json({
         success: true,

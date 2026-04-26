@@ -5,13 +5,8 @@ const {
   appendPacket,
   closeStorageStreams,
   cleanupExpiredPacketFiles,
-  listPacketFiles,
-  parseStoragePath,
   RETENTION_DAYS,
-  RETENTION_MS,
-  scanPacketFile,
 } = require('../helpers/storage')
-const { query } = require('../helpers/db')
 const { parsePacket } = require('../helpers/jt1078')
 const { writeIngestStats } = require('../helpers/runtime-state')
 
@@ -34,17 +29,12 @@ class PacketController {
     this.lastUnrecoverableError = null
     this.unrecoverableSamples = []
     this.streamStates = new Map()
-    this.pendingRows = []
-    this.pendingGapRows = []
-    this.processingQueue = false
-    this.reindexInProgress = false
     this.lastStatsPackets = 0
     this.lastStatsBytes = 0
     this.lastStatsAt = Date.now()
     this.lastLoggedGapEvents = 0
     this.lastLoggedMissingPackets = 0
-    this.lastLoggedDbError = null
-    this.lastLoggedPendingRows = 0
+    this.lastLoggedUnrecoverablePackets = 0
     this.lastRetentionRunAt = 0
     this.retentionTimer = setInterval(() => {
       void this.runRetentionCleanup()
@@ -58,13 +48,10 @@ class PacketController {
 
   async initialize() {
     void this.runRetentionCleanup().catch((error) => {
-      this.lastDbError = error.message || String(error)
-      console.error('Background retention cleanup failed:', this.lastDbError)
+      this.lastUnrecoverableError = error.message || String(error)
+      console.error('Background retention cleanup failed:', this.lastUnrecoverableError)
     })
-    void this.rebuildRecentIndexFromFiles().catch((error) => {
-      this.lastDbError = error.message || String(error)
-      console.error('Background reindex failed:', this.lastDbError)
-    })
+    this.persistRuntimeStats()
   }
 
   handlePacket(meta, payloadBuffer) {
@@ -106,49 +93,17 @@ class PacketController {
     const vehicleId = String(meta.vehicleId || '').trim()
     const channel = Number(meta.channel || 0)
     const packetTimestampMs = Number(meta.timestamp || Date.now())
-    const relayType = String(meta.type || 'tcp-rtp')
-    const packetSize = Number(meta.size || payloadBuffer.length || 0)
-    const payloadHexPreview = config.storeHexPreview
-      ? payloadBuffer.toString('hex').slice(0, 120)
-      : null
     const parsedPacket = parsePacket(payloadBuffer)
 
-    let sequenceNumber = null
-    let dataType = null
-    let fragmentType = null
-    let gapEvent = null
-
     if (parsedPacket) {
-      sequenceNumber = parsedPacket.sequence
-      dataType = parsedPacket.dataType
-      fragmentType = parsedPacket.fragmentType
-      gapEvent = this.trackSequence({
+      this.trackSequence({
         vehicleId,
         channel,
-        sequenceNumber,
+        sequenceNumber: parsedPacket.sequence,
         packetTimestampMs,
       })
     }
 
-    this.pendingRows.push({
-      relayType,
-      vehicleId,
-      channel,
-      packetTimestampMs,
-      sequenceNumber,
-      dataType,
-      fragmentType,
-      packetSize,
-      fileOffsetBytes: storageRecord.fileOffsetBytes,
-      payloadHexPreview,
-      payloadPath: storageRecord.filePath,
-    })
-
-    if (gapEvent) {
-      this.pendingGapRows.push(gapEvent)
-    }
-
-    void this.flushPendingRows()
     return storageRecord.filePath
   }
 
@@ -177,409 +132,7 @@ class PacketController {
     console.error(
       `Unrecoverable packet loss: reason=${sample.reason} vehicleId=${sample.vehicleId || 'unknown'} channel=${sample.channel ?? 'unknown'} payloadBytes=${sample.payloadLength}${sample.error ? ` error=${sample.error}` : ''}`,
     )
-  }
-
-  async flushPendingRows() {
-    if (this.processingQueue) {
-      return
-    }
-
-    this.processingQueue = true
-    let currentPacketBatch = null
-    let currentGapBatch = null
-    try {
-      while (this.pendingRows.length > 0) {
-        currentPacketBatch = this.pendingRows.splice(0, config.packetBatchSize)
-        const packetValues = []
-        const packetPlaceholders = currentPacketBatch.map((record, rowIndex) => {
-          const base = rowIndex * 11
-          packetValues.push(
-            record.relayType,
-            record.vehicleId,
-            record.channel,
-            record.packetTimestampMs,
-            record.sequenceNumber,
-            record.dataType,
-            record.fragmentType,
-            record.packetSize,
-            record.fileOffsetBytes,
-            record.payloadHexPreview,
-            record.payloadPath,
-          )
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`
-        })
-
-        const packetInsertResult = await query(
-          `INSERT INTO raw_video_packets (
-             relay_type,
-             vehicle_id,
-             channel,
-             packet_timestamp_ms,
-             sequence_number,
-             data_type,
-             fragment_type,
-             packet_size,
-             file_offset_bytes,
-             payload_hex_preview,
-             payload_path
-           )
-           SELECT
-             v.relay_type::text,
-             v.vehicle_id::text,
-             v.channel::integer,
-             v.packet_timestamp_ms::bigint,
-             v.sequence_number::integer,
-             v.data_type::integer,
-             v.fragment_type::integer,
-             v.packet_size::integer,
-             v.file_offset_bytes::bigint,
-             v.payload_hex_preview::text,
-             v.payload_path::text
-           FROM (VALUES ${packetPlaceholders.join(', ')}) AS v(
-             relay_type,
-             vehicle_id,
-             channel,
-             packet_timestamp_ms,
-             sequence_number,
-             data_type,
-             fragment_type,
-             packet_size,
-             file_offset_bytes,
-             payload_hex_preview,
-             payload_path
-           )
-           WHERE NOT EXISTS (
-             SELECT 1
-             FROM raw_video_packets existing
-             WHERE existing.payload_path = v.payload_path::text
-               AND existing.file_offset_bytes = v.file_offset_bytes::bigint
-          )`,
-          packetValues,
-        )
-
-        this.insertedPackets += packetInsertResult.rowCount
-        await this.persistIndexState(currentPacketBatch)
-        currentPacketBatch = null
-      }
-
-      while (this.pendingGapRows.length > 0) {
-        currentGapBatch = this.pendingGapRows.splice(0, config.packetBatchSize)
-        const gapValues = []
-        const gapPlaceholders = currentGapBatch.map((gapEvent, rowIndex) => {
-          const base = rowIndex * 7
-          gapValues.push(
-            gapEvent.vehicleId,
-            gapEvent.channel,
-            gapEvent.previousSequenceNumber,
-            gapEvent.expectedSequenceNumber,
-            gapEvent.actualSequenceNumber,
-            gapEvent.missingPacketCount,
-            gapEvent.packetTimestampMs,
-          )
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`
-        })
-
-        await query(
-          `INSERT INTO packet_sequence_gaps (
-             vehicle_id,
-             channel,
-             previous_sequence_number,
-             expected_sequence_number,
-             actual_sequence_number,
-             missing_packet_count,
-             packet_timestamp_ms
-           )
-           SELECT
-             v.vehicle_id::text,
-             v.channel::integer,
-             v.previous_sequence_number::integer,
-             v.expected_sequence_number::integer,
-             v.actual_sequence_number::integer,
-             v.missing_packet_count::integer,
-             v.packet_timestamp_ms::bigint
-           FROM (VALUES ${gapPlaceholders.join(', ')}) AS v(
-             vehicle_id,
-             channel,
-             previous_sequence_number,
-             expected_sequence_number,
-             actual_sequence_number,
-             missing_packet_count,
-             packet_timestamp_ms
-          )`,
-          gapValues,
-        )
-
-        this.insertedGapEvents += currentGapBatch.length
-        currentGapBatch = null
-      }
-
-      this.lastDbError = null
-    } catch (error) {
-      if (currentPacketBatch && currentPacketBatch.length > 0) {
-        this.pendingRows.unshift(...currentPacketBatch)
-      }
-      if (currentGapBatch && currentGapBatch.length > 0) {
-        this.pendingGapRows.unshift(...currentGapBatch)
-      }
-      this.lastDbError = error.message || String(error)
-      console.error('Durable DB write failed:', this.lastDbError)
-    } finally {
-      this.processingQueue = false
-    }
-  }
-
-  async rebuildRecentIndexFromFiles() {
-    if (this.reindexInProgress) {
-      return
-    }
-
-    this.reindexInProgress = true
-    try {
-      const cutoffMs = Date.now() - RETENTION_MS
-      const stateResult = await query(
-        `SELECT payload_path, last_indexed_offset_bytes FROM storage_index_state`,
-      )
-      const indexState = new Map(
-        stateResult.rows.map((row) => [
-          row.payload_path,
-          Number(row.last_indexed_offset_bytes || 0),
-        ]),
-      )
-
-      const packetFiles = listPacketFiles()
-        .map((filePath) => ({
-          filePath,
-          stats: fs.statSync(filePath),
-        }))
-        .filter((entry) => entry.stats.mtimeMs >= cutoffMs)
-        .sort((a, b) => a.filePath.localeCompare(b.filePath))
-
-      for (const entry of packetFiles) {
-        const identity = parseStoragePath(entry.filePath)
-        if (!identity) {
-          continue
-        }
-
-        const startOffset = indexState.get(entry.filePath) || 0
-        if (startOffset >= entry.stats.size) {
-          continue
-        }
-
-        const rows = []
-        const gapRows = []
-        const scanResult = await scanPacketFile(entry.filePath, async ({ timestampMs, packet, fileOffsetBytes, packetSize }) => {
-          const parsedPacket = parsePacket(packet)
-          let sequenceNumber = null
-          let dataType = null
-          let fragmentType = null
-          let gapEvent = null
-
-          if (parsedPacket) {
-            sequenceNumber = parsedPacket.sequence
-            dataType = parsedPacket.dataType
-            fragmentType = parsedPacket.fragmentType
-            gapEvent = this.trackSequence({
-              vehicleId: identity.vehicleId,
-              channel: identity.channel,
-              sequenceNumber,
-              packetTimestampMs: timestampMs,
-            })
-          }
-
-          rows.push({
-            relayType: 'tcp-rtp',
-            vehicleId: identity.vehicleId,
-            channel: identity.channel,
-            packetTimestampMs: timestampMs,
-            sequenceNumber,
-            dataType,
-            fragmentType,
-            packetSize,
-            fileOffsetBytes,
-            payloadHexPreview: null,
-            payloadPath: entry.filePath,
-          })
-
-          if (gapEvent) {
-            gapRows.push(gapEvent)
-          }
-
-          if (rows.length >= config.packetBatchSize) {
-            await this.insertRecoveredRows(rows.splice(0, rows.length))
-          }
-          if (gapRows.length >= config.packetBatchSize) {
-            await this.insertRecoveredGaps(gapRows.splice(0, gapRows.length))
-          }
-        }, startOffset)
-
-        if (rows.length) {
-          await this.insertRecoveredRows(rows)
-        }
-        if (gapRows.length) {
-          await this.insertRecoveredGaps(gapRows)
-        }
-
-        await query(
-          `INSERT INTO storage_index_state (payload_path, last_indexed_offset_bytes, updated_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT (payload_path)
-           DO UPDATE SET
-             last_indexed_offset_bytes = EXCLUDED.last_indexed_offset_bytes,
-             updated_at = NOW()`,
-          [entry.filePath, scanResult.finalOffsetBytes],
-        )
-      }
-    } finally {
-      this.reindexInProgress = false
-    }
-  }
-
-  async insertRecoveredRows(rows) {
-    if (!rows.length) {
-      return
-    }
-
-    const packetValues = []
-    const packetPlaceholders = rows.map((record, rowIndex) => {
-      const base = rowIndex * 11
-      packetValues.push(
-        record.relayType,
-        record.vehicleId,
-        record.channel,
-        record.packetTimestampMs,
-        record.sequenceNumber,
-        record.dataType,
-        record.fragmentType,
-        record.packetSize,
-        record.fileOffsetBytes,
-        record.payloadHexPreview,
-        record.payloadPath,
-      )
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`
-    })
-
-    const result = await query(
-      `INSERT INTO raw_video_packets (
-         relay_type,
-         vehicle_id,
-         channel,
-         packet_timestamp_ms,
-         sequence_number,
-         data_type,
-         fragment_type,
-         packet_size,
-         file_offset_bytes,
-         payload_hex_preview,
-         payload_path
-       )
-       SELECT
-         v.relay_type::text,
-         v.vehicle_id::text,
-         v.channel::integer,
-         v.packet_timestamp_ms::bigint,
-         v.sequence_number::integer,
-         v.data_type::integer,
-         v.fragment_type::integer,
-         v.packet_size::integer,
-         v.file_offset_bytes::bigint,
-         v.payload_hex_preview::text,
-         v.payload_path::text
-       FROM (VALUES ${packetPlaceholders.join(', ')}) AS v(
-         relay_type,
-         vehicle_id,
-         channel,
-         packet_timestamp_ms,
-         sequence_number,
-         data_type,
-         fragment_type,
-         packet_size,
-         file_offset_bytes,
-         payload_hex_preview,
-         payload_path
-       )
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM raw_video_packets existing
-         WHERE existing.payload_path = v.payload_path::text
-           AND existing.file_offset_bytes = v.file_offset_bytes::bigint
-       )`,
-      packetValues,
-    )
-
-    this.insertedPackets += result.rowCount
-    await this.persistIndexState(rows)
-  }
-
-  async persistIndexState(rows) {
-    if (!rows.length) {
-      return
-    }
-
-    const latestByPath = new Map()
-    for (const row of rows) {
-      const nextOffset = Number(row.fileOffsetBytes || 0) + 12 + Number(row.packetSize || 0)
-      const existing = latestByPath.get(row.payloadPath)
-      if (!existing || nextOffset > existing.lastIndexedOffsetBytes) {
-        latestByPath.set(row.payloadPath, {
-          payloadPath: row.payloadPath,
-          lastIndexedOffsetBytes: nextOffset,
-        })
-      }
-    }
-
-    const values = []
-    const placeholders = [...latestByPath.values()].map((row, index) => {
-      const base = index * 2
-      values.push(row.payloadPath, row.lastIndexedOffsetBytes)
-      return `($${base + 1}, $${base + 2}, NOW())`
-    })
-
-    await query(
-      `INSERT INTO storage_index_state (payload_path, last_indexed_offset_bytes, updated_at)
-       VALUES ${placeholders.join(', ')}
-       ON CONFLICT (payload_path)
-       DO UPDATE SET
-         last_indexed_offset_bytes = GREATEST(storage_index_state.last_indexed_offset_bytes, EXCLUDED.last_indexed_offset_bytes),
-         updated_at = NOW()`,
-      values,
-    )
-  }
-
-  async insertRecoveredGaps(gapRows) {
-    if (!gapRows.length) {
-      return
-    }
-
-    const gapValues = []
-    const gapPlaceholders = gapRows.map((gapEvent, rowIndex) => {
-      const base = rowIndex * 7
-      gapValues.push(
-        gapEvent.vehicleId,
-        gapEvent.channel,
-        gapEvent.previousSequenceNumber,
-        gapEvent.expectedSequenceNumber,
-        gapEvent.actualSequenceNumber,
-        gapEvent.missingPacketCount,
-        gapEvent.packetTimestampMs,
-      )
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`
-    })
-
-    await query(
-      `INSERT INTO packet_sequence_gaps (
-         vehicle_id,
-         channel,
-         previous_sequence_number,
-         expected_sequence_number,
-         actual_sequence_number,
-         missing_packet_count,
-         packet_timestamp_ms
-       )
-       VALUES ${gapPlaceholders.join(', ')}`,
-      gapValues,
-    )
-
-    this.insertedGapEvents += gapRows.length
+    this.persistRuntimeStats()
   }
 
   async runRetentionCleanup() {
@@ -589,22 +142,7 @@ class PacketController {
     }
     this.lastRetentionRunAt = now
 
-    const { cutoffMs, deletedFiles } = cleanupExpiredPacketFiles(now)
-    await query(
-      `DELETE FROM raw_video_packets WHERE packet_timestamp_ms < $1`,
-      [cutoffMs],
-    )
-    await query(
-      `DELETE FROM packet_sequence_gaps WHERE packet_timestamp_ms < $1`,
-      [cutoffMs],
-    )
-    if (deletedFiles.length > 0) {
-      await query(
-        `DELETE FROM storage_index_state WHERE payload_path = ANY($1::text[])`,
-        [deletedFiles],
-      )
-    }
-
+    const { deletedFiles } = cleanupExpiredPacketFiles(now)
     if (deletedFiles.length > 0) {
       console.log(
         `Retention cleanup complete: removed ${deletedFiles.length} packet file(s) older than ${RETENTION_DAYS} day(s)`,
@@ -619,35 +157,24 @@ class PacketController {
     const byteDelta = this.processedBytes - this.lastStatsBytes
     const packetsPerSecond = ((packetDelta * 1000) / elapsedMs).toFixed(0)
     const megabytesPerSecond = ((byteDelta / 1024 / 1024) * (1000 / elapsedMs)).toFixed(2)
-    const pendingDbRows = this.pendingRows.length
     const hasNewGapEvent = this.sequenceGapEvents > this.lastLoggedGapEvents
     const hasNewMissingPackets =
       this.sequenceGapPackets > this.lastLoggedMissingPackets
-    const hasDbError =
-      !!this.lastDbError && this.lastDbError !== this.lastLoggedDbError
-    const hasBacklog =
-      pendingDbRows > 0 &&
-      (this.lastLoggedPendingRows === 0 ||
-        pendingDbRows >= this.lastLoggedPendingRows + config.packetBatchSize)
+    const hasNewUnrecoverablePackets =
+      this.unrecoverablePackets > this.lastLoggedUnrecoverablePackets
 
-    if (hasDbError || hasBacklog || hasNewGapEvent || hasNewMissingPackets) {
+    if (hasNewGapEvent || hasNewMissingPackets || hasNewUnrecoverablePackets) {
       const parts = [
         `Packets stored: ${this.processedPackets}`,
         `rate=${packetsPerSecond}/s`,
         `throughput=${megabytesPerSecond} MB/s`,
-        `insertedDbRows=${this.insertedPackets}`,
-        `pendingDbRows=${pendingDbRows}`,
         `gapEvents=${this.sequenceGapEvents}`,
         `missingPackets=${this.sequenceGapPackets}`,
+        `unrecoverablePackets=${this.unrecoverablePackets}`,
       ]
-
-      if (this.lastDbError) {
-        parts.push(`dbError=${this.lastDbError}`)
+      if (this.lastUnrecoverableError) {
+        parts.push(`lastUnrecoverableError=${this.lastUnrecoverableError}`)
       }
-      if (this.unrecoverablePackets > 0) {
-        parts.push(`unrecoverablePackets=${this.unrecoverablePackets}`)
-      }
-
       console.warn(parts.join(' | '))
     }
 
@@ -656,8 +183,7 @@ class PacketController {
     this.lastStatsAt = now
     this.lastLoggedGapEvents = this.sequenceGapEvents
     this.lastLoggedMissingPackets = this.sequenceGapPackets
-    this.lastLoggedDbError = this.lastDbError
-    this.lastLoggedPendingRows = pendingDbRows
+    this.lastLoggedUnrecoverablePackets = this.unrecoverablePackets
     this.persistRuntimeStats()
   }
 
@@ -672,20 +198,6 @@ class PacketController {
   async close() {
     clearInterval(this.statsTimer)
     clearInterval(this.retentionTimer)
-
-    while (this.processingQueue) {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-
-    while (this.pendingRows.length > 0 || this.pendingGapRows.length > 0) {
-      await this.flushPendingRows()
-      if (this.processingQueue) {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      }
-      if (this.lastDbError) {
-        break
-      }
-    }
 
     if (this.rawOutput) {
       await new Promise((resolve) => this.rawOutput.end(resolve))
@@ -702,7 +214,6 @@ class PacketController {
 
     const key = `${vehicleId}:${channel}`
     const previous = this.streamStates.get(key)
-    let gapEvent = null
 
     if (previous && Number.isFinite(previous.lastSequence)) {
       const expected = (previous.lastSequence + 1) & 0xffff
@@ -720,15 +231,6 @@ class PacketController {
         if (missingPacketCount > 0 && !looksLikeReset) {
           this.sequenceGapEvents += 1
           this.sequenceGapPackets += missingPacketCount
-          gapEvent = {
-            vehicleId,
-            channel,
-            previousSequenceNumber: previous.lastSequence,
-            expectedSequenceNumber: expected,
-            actualSequenceNumber: sequenceNumber,
-            missingPacketCount,
-            packetTimestampMs,
-          }
         }
       }
     }
@@ -737,8 +239,6 @@ class PacketController {
       lastSequence: sequenceNumber,
       lastPacketTimestampMs: packetTimestampMs,
     })
-
-    return gapEvent
   }
 
   getStats() {
@@ -758,16 +258,16 @@ class PacketController {
     return {
       receivedPackets: this.processedPackets,
       receivedBytes: this.processedBytes,
-      insertedPackets: this.insertedPackets,
-      packetWriteLag: this.processedPackets - this.insertedPackets,
-      pendingDbRows: this.pendingRows.length,
-      pendingGapRows: this.pendingGapRows.length,
-      reindexInProgress: this.reindexInProgress,
+      insertedPackets: 0,
+      packetWriteLag: 0,
+      pendingDbRows: 0,
+      pendingGapRows: 0,
+      reindexInProgress: false,
       retentionDays: RETENTION_DAYS,
       sequenceGapEvents: this.sequenceGapEvents,
       sequenceGapPackets: this.sequenceGapPackets,
-      insertedGapEvents: this.insertedGapEvents,
-      lastDbError: this.lastDbError,
+      insertedGapEvents: 0,
+      lastDbError: null,
       unrecoverablePackets: this.unrecoverablePackets,
       unrecoverableBytes: this.unrecoverableBytes,
       lastUnrecoverableError: this.lastUnrecoverableError,

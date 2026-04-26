@@ -1,13 +1,10 @@
 const express = require('express')
-const { ensureSchema, closePool } = require('./helpers/db')
 const config = require('./helpers/config')
 const { ExportController, EXPORT_ROOT } = require('./controllers/export-controller')
 const { ApiController } = require('./controllers/api-controller')
 
 async function start() {
-  console.log('API startup: ensuring schema...')
-  await ensureSchema()
-  console.log('API startup: schema ready')
+  console.log('API startup: file-first mode ready')
 
   const exportController = new ExportController()
   const apiController = new ApiController({
@@ -43,6 +40,7 @@ async function start() {
     await new Promise((resolve) => apiServer.close(resolve))
 
     try {
+      const { closePool } = require('./helpers/db')
       await closePool()
     } catch (error) {
       console.error('API database shutdown failed:', error.message || String(error))
@@ -61,6 +59,7 @@ async function start() {
 
 start().catch(async (error) => {
   console.error('Fatal API startup error:', error.message || String(error))
+  const { closePool } = require('./helpers/db')
   await closePool().catch(() => {})
   process.exit(1)
 })
