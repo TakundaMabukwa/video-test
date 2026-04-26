@@ -1,0 +1,10 @@
+node_modules/
+storage/
+exports/
+journal/
+output.bin
+*.log
+server-test.out.log
+server-test.err.log
+.env
+.env.local

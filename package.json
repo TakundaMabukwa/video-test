@@ -1,0 +1,17 @@
+{
+  "name": "jt1078-raw-stream-client",
+  "version": "1.0.0",
+  "description": "Raw TCP client for testing JT1078 live stream relay",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "export:video": "node export-video.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.16.3"
+  }
+}
