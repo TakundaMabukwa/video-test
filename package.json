@@ -2,10 +2,12 @@
   "name": "jt1078-raw-stream-client",
   "version": "1.0.0",
   "description": "Raw TCP client for testing JT1078 live stream relay",
-  "main": "server.js",
+  "main": "api-server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
+    "start": "node api-server.js",
+    "start:api": "node api-server.js",
+    "start:ingest": "node ingest-server.js",
     "export:video": "node export-video.js"
   },
   "author": "",

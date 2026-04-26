@@ -13,6 +13,7 @@ const {
 } = require('../helpers/storage')
 const { query } = require('../helpers/db')
 const { parsePacket } = require('../helpers/jt1078')
+const { writeIngestStats } = require('../helpers/runtime-state')
 
 class PacketController {
   constructor() {
@@ -657,6 +658,15 @@ class PacketController {
     this.lastLoggedMissingPackets = this.sequenceGapPackets
     this.lastLoggedDbError = this.lastDbError
     this.lastLoggedPendingRows = pendingDbRows
+    this.persistRuntimeStats()
+  }
+
+  persistRuntimeStats() {
+    try {
+      writeIngestStats(this.getStats())
+    } catch (error) {
+      console.error('Failed to persist ingest stats:', error.message || String(error))
+    }
   }
 
   async close() {
@@ -682,6 +692,7 @@ class PacketController {
     }
 
     await closeStorageStreams()
+    this.persistRuntimeStats()
   }
 
   trackSequence({ vehicleId, channel, sequenceNumber, packetTimestampMs }) {

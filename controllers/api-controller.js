@@ -1,5 +1,6 @@
 const { query } = require('../helpers/db')
 const { summarizeCoverageForRange } = require('../helpers/storage')
+const { readIngestStats } = require('../helpers/runtime-state')
 
 class ApiController {
   constructor({ exportController, packetController }) {
@@ -54,9 +55,10 @@ class ApiController {
   }
 
   ingestStats = (req, res) => {
+    const runtimeStats = this.packetController?.getStats?.() || readIngestStats()?.stats || null
     return res.status(200).json({
       success: true,
-      stats: this.packetController.getStats(),
+      stats: runtimeStats,
     })
   }
 
