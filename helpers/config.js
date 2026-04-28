@@ -42,6 +42,17 @@ function getNumber(name, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function getBoolean(name, fallback = false) {
+  const value = getString(name, String(fallback))
+  if (/^(1|true|yes|on)$/i.test(value)) {
+    return true
+  }
+  if (/^(0|false|no|off)$/i.test(value)) {
+    return false
+  }
+  return fallback
+}
+
 module.exports = {
   relayHost: getString('RELAY_HOST', '209.38.206.44'),
   relayPort: getNumber('RELAY_PORT', 7081),
@@ -58,4 +69,22 @@ module.exports = {
   mirrorRawOutput: false,
   storeHexPreview: false,
   rawDebugLogs: false,
+  natsUrl: getString('NATS_URL', 'nats://127.0.0.1:4222'),
+  natsStreamName: getString('NATS_STREAM_NAME', 'VIDEO_PACKET_STREAM'),
+  natsSubject: getString('NATS_SUBJECT', 'video.packet'),
+  natsConsumerName: getString('NATS_CONSUMER_NAME', 'video-packet-writer'),
+  natsPublishTimeoutMs: getNumber('NATS_PUBLISH_TIMEOUT_MS', 5000),
+  natsStreamMaxAgeMs: getNumber('NATS_STREAM_MAX_AGE_MS', 72 * 60 * 60 * 1000),
+  natsDuplicateWindowMs: getNumber('NATS_DUPLICATE_WINDOW_MS', 2 * 60 * 1000),
+  natsStreamMaxBytes: getNumber('NATS_STREAM_MAX_BYTES', 50 * 1024 * 1024 * 1024),
+  natsConsumerMaxAckPending: getNumber('NATS_CONSUMER_MAX_ACK_PENDING', 20000),
+  natsConsumerMaxDeliver: getNumber('NATS_CONSUMER_MAX_DELIVER', -1),
+  natsConsumerInactiveThresholdMs: getNumber(
+    'NATS_CONSUMER_INACTIVE_THRESHOLD_MS',
+    24 * 60 * 60 * 1000,
+  ),
+  natsConsumeBatchSize: getNumber('NATS_CONSUME_BATCH_SIZE', 500),
+  natsConsumeExpiresMs: getNumber('NATS_CONSUME_EXPIRES_MS', 30000),
+  natsConsumeIdleHeartbeatMs: getNumber('NATS_CONSUME_IDLE_HEARTBEAT_MS', 5000),
+  queueWorkerEnabled: getBoolean('QUEUE_WORKER_ENABLED', true),
 }

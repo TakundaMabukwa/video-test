@@ -287,6 +287,42 @@ function parseStoragePath(filePath) {
   }
 }
 
+function parseStorageHourFromPath(filePath) {
+  const relative = path.relative(STORAGE_ROOT, filePath)
+  const parts = relative.split(path.sep)
+  if (parts.length !== 4) {
+    return null
+  }
+
+  const [vehicleId, channelPart, datePart, filePart] = parts
+  const channel = Number(String(channelPart || '').replace(/^ch/i, ''))
+  const hourPart = String(filePart || '').replace(/\.packets$/i, '')
+
+  if (!vehicleId || !Number.isFinite(channel) || channel <= 0) {
+    return null
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    return null
+  }
+  if (!/^\d{2}$/.test(hourPart)) {
+    return null
+  }
+
+  const startMs = Date.parse(`${datePart}T${hourPart}:00:00.000Z`)
+  if (!Number.isFinite(startMs)) {
+    return null
+  }
+
+  return {
+    vehicleId,
+    channel,
+    startMs,
+    endMs: startMs + (60 * 60 * 1000) - 1,
+    date: datePart,
+    hour: hourPart,
+  }
+}
+
 function listPacketFiles(root = STORAGE_ROOT) {
   const files = []
 
@@ -309,6 +345,62 @@ function listPacketFiles(root = STORAGE_ROOT) {
 
   walk(root)
   return files
+}
+
+function summarizeVehicleApproxCoverage(vehicleId) {
+  const normalizedVehicleId = String(vehicleId || '').trim()
+  if (!normalizedVehicleId) {
+    return []
+  }
+
+  const targetRoot = path.join(STORAGE_ROOT, normalizedVehicleId)
+  if (!fs.existsSync(targetRoot)) {
+    return []
+  }
+
+  const summary = new Map()
+  const files = listPacketFiles(targetRoot)
+  for (const filePath of files) {
+    const parsed = parseStorageHourFromPath(filePath)
+    if (!parsed || parsed.vehicleId !== normalizedVehicleId) {
+      continue
+    }
+
+    const key = `${parsed.vehicleId}:${parsed.channel}`
+    const existing = summary.get(key) || {
+      vehicle_id: parsed.vehicleId,
+      channel: parsed.channel,
+      file_count: 0,
+      approx_first_packet_timestamp_ms: null,
+      approx_last_packet_timestamp_ms: null,
+    }
+
+    existing.file_count += 1
+    existing.approx_first_packet_timestamp_ms =
+      existing.approx_first_packet_timestamp_ms === null
+        ? parsed.startMs
+        : Math.min(existing.approx_first_packet_timestamp_ms, parsed.startMs)
+    existing.approx_last_packet_timestamp_ms =
+      existing.approx_last_packet_timestamp_ms === null
+        ? parsed.endMs
+        : Math.max(existing.approx_last_packet_timestamp_ms, parsed.endMs)
+
+    summary.set(key, existing)
+  }
+
+  return [...summary.values()]
+    .map((row) => ({
+      ...row,
+      approx_first_packet_time:
+        row.approx_first_packet_timestamp_ms !== null
+          ? new Date(row.approx_first_packet_timestamp_ms).toISOString()
+          : null,
+      approx_last_packet_time:
+        row.approx_last_packet_timestamp_ms !== null
+          ? new Date(row.approx_last_packet_timestamp_ms).toISOString()
+          : null,
+    }))
+    .sort((a, b) => a.channel - b.channel)
 }
 
 function removeEmptyDirectories(startPath, stopAt = STORAGE_ROOT) {
@@ -381,6 +473,7 @@ module.exports = {
   readPacketAt,
   scanPacketFile,
   parseStoragePath,
+  summarizeVehicleApproxCoverage,
   listPacketFiles,
   summarizeCoverageForRange,
   cleanupExpiredPacketFiles,

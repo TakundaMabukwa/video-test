@@ -18,6 +18,7 @@ async function start() {
   app.get('/health', apiController.health)
   app.get('/api/ingest/stats', apiController.ingestStats)
   app.get('/api/video/coverage', apiController.coverage)
+  app.get('/api/vehicles/:vehicleId/video/availability', apiController.vehicleAvailability)
   app.get('/api/vehicles/:vehicleId/video', apiController.exportVehicleRange)
   app.post('/api/vehicles/:vehicleId/video', apiController.exportVehicleRange)
   app.get('/api/vehicles/:vehicleId/video/:channel', apiController.exportVehicleRange)

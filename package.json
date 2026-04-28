@@ -9,12 +9,14 @@
     "start:all": "pm2 start ecosystem.config.js",
     "start:api": "node api-server.js",
     "start:ingest": "node ingest-server.js",
+    "start:worker": "node queue-worker.js",
     "export:video": "node export-video.js"
   },
   "author": "",
   "license": "MIT",
   "dependencies": {
     "express": "^4.21.2",
+    "nats": "^2.28.2",
     "pg": "^8.16.3"
   }
 }

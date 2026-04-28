@@ -10,5 +10,10 @@ module.exports = {
       script: 'ingest-server.js',
       cwd: __dirname,
     },
+    {
+      name: 'video-feed-worker',
+      script: 'queue-worker.js',
+      cwd: __dirname,
+    },
   ],
 }

@@ -1,5 +1,5 @@
-const { summarizeCoverageForRange } = require('../helpers/storage')
-const { readIngestStats } = require('../helpers/runtime-state')
+const { summarizeCoverageForRange, summarizeVehicleApproxCoverage } = require('../helpers/storage')
+const { readIngestStats, readIngestRelayStats } = require('../helpers/runtime-state')
 
 class ApiController {
   constructor({ exportController, packetController }) {
@@ -8,6 +8,10 @@ class ApiController {
   }
 
   parseTimestampMs(value) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric) && String(value).trim() !== '') {
+      return numeric
+    }
     const ms = new Date(value).getTime()
     return Number.isFinite(ms) ? ms : null
   }
@@ -49,15 +53,34 @@ class ApiController {
     }
   }
 
+  buildAbsoluteMediaUrl(req, maybeRelativePath) {
+    if (!maybeRelativePath) {
+      return null
+    }
+    if (/^https?:\/\//i.test(maybeRelativePath)) {
+      return maybeRelativePath
+    }
+
+    const protocolHeader = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+    const protocol = protocolHeader || req.protocol || 'http'
+    const host = req.get('host')
+    if (!host) {
+      return maybeRelativePath
+    }
+    return `${protocol}://${host}${maybeRelativePath}`
+  }
+
   health(req, res) {
     res.json({ success: true, status: 'ok' })
   }
 
   ingestStats = (req, res) => {
-    const runtimeStats = this.packetController?.getStats?.() || readIngestStats()?.stats || null
+    const workerStats = this.packetController?.getStats?.() || readIngestStats()?.stats || null
+    const relayStats = readIngestRelayStats()?.stats || null
     return res.status(200).json({
       success: true,
-      stats: runtimeStats,
+      stats: workerStats,
+      relayStats,
     })
   }
 
@@ -106,6 +129,40 @@ class ApiController {
     }
   }
 
+  vehicleAvailability = async (req, res) => {
+    try {
+      const vehicleId = String(req.params?.vehicleId || '').trim()
+      if (!vehicleId) {
+        return res.status(400).json({
+          success: false,
+          message: 'vehicleId is required',
+        })
+      }
+
+      const hasChannelsFilter = /(?:\?|&)channels=/.test(String(req.originalUrl || ''))
+      const channels = hasChannelsFilter
+        ? this.parseChannels(req.query?.channels)
+        : []
+      let rows = summarizeVehicleApproxCoverage(vehicleId)
+      if (channels.length) {
+        rows = rows.filter((row) => channels.includes(row.channel))
+      }
+
+      return res.status(200).json({
+        success: true,
+        vehicleId,
+        channels: hasChannelsFilter ? channels : null,
+        count: rows.length,
+        rows,
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
   exportVehicleRange = async (req, res) => {
     try {
       const { vehicleId, from, to, preRollMs, channels } = this.buildExportRequest(req)
@@ -125,9 +182,18 @@ class ApiController {
         channels,
       })
 
+      const channelsWithAbsoluteUrls = (result.channels || []).map((channelResult) => ({
+        ...channelResult,
+        playUrlAbsolute: this.buildAbsoluteMediaUrl(req, channelResult.playUrl),
+        mp4UrlAbsolute: this.buildAbsoluteMediaUrl(req, channelResult.mp4Url),
+        h264UrlAbsolute: this.buildAbsoluteMediaUrl(req, channelResult.h264Url),
+        rawPacketsUrlAbsolute: this.buildAbsoluteMediaUrl(req, channelResult.rawPacketsUrl),
+      }))
+
       return res.status(200).json({
         success: true,
         ...result,
+        channels: channelsWithAbsoluteUrls,
       })
     } catch (error) {
       return res.status(500).json({

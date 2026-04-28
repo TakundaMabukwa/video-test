@@ -3,6 +3,7 @@ const path = require('path')
 
 const RUNTIME_DIR = path.join(process.cwd(), 'runtime')
 const INGEST_STATS_PATH = path.join(RUNTIME_DIR, 'ingest-stats.json')
+const INGEST_RELAY_STATS_PATH = path.join(RUNTIME_DIR, 'ingest-relay-stats.json')
 
 function ensureDir() {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true })
@@ -29,8 +30,32 @@ function readIngestStats() {
   }
 }
 
+function writeIngestRelayStats(stats) {
+  ensureDir()
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    stats,
+  }
+  fs.writeFileSync(INGEST_RELAY_STATS_PATH, JSON.stringify(payload, null, 2))
+}
+
+function readIngestRelayStats() {
+  if (!fs.existsSync(INGEST_RELAY_STATS_PATH)) {
+    return null
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(INGEST_RELAY_STATS_PATH, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 module.exports = {
   INGEST_STATS_PATH,
+  INGEST_RELAY_STATS_PATH,
   writeIngestStats,
   readIngestStats,
+  writeIngestRelayStats,
+  readIngestRelayStats,
 }

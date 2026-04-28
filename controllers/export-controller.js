@@ -1,7 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
-const { readPacketsForRange } = require('../helpers/storage')
+const { readPacketsForRange, summarizeVehicleApproxCoverage } = require('../helpers/storage')
 const { createFrameAssembler } = require('../helpers/jt1078')
 
 const EXPORT_ROOT = path.join(process.cwd(), 'exports')
@@ -12,6 +12,14 @@ function ensureDir(dirPath) {
 
 function safeStamp(value) {
   return new Date(value).toISOString().replace(/[:.]/g, '-')
+}
+
+function parseDateInput(value) {
+  const numeric = Number(value)
+  if (Number.isFinite(numeric) && String(value).trim() !== '') {
+    return new Date(numeric)
+  }
+  return new Date(value)
 }
 
 async function tryTranscodeToMp4(inputPath, outputPath) {
@@ -82,8 +90,8 @@ function estimateFrameRate(frameTimestamps) {
 
 class ExportController {
   async exportVideo({ vehicleId, channel, from, to, preRollMs = 5000 }) {
-    const requestedFrom = new Date(from)
-    const requestedTo = new Date(to)
+    const requestedFrom = parseDateInput(from)
+    const requestedTo = parseDateInput(to)
     if (Number.isNaN(requestedFrom.getTime()) || Number.isNaN(requestedTo.getTime())) {
       throw new Error('Invalid from/to timestamp')
     }
@@ -136,6 +144,20 @@ class ExportController {
     await new Promise((resolve) => rawOut.end(resolve))
     await new Promise((resolve) => h264Out.end(resolve))
 
+    if (packetCount === 0) {
+      const approxCoverage = summarizeVehicleApproxCoverage(vehicleId)
+      const channelCoverage = approxCoverage.find((row) => row.channel === channel) || null
+      if (!channelCoverage) {
+        throw new Error(
+          `No packets found for vehicle ${vehicleId} channel ${channel} in requested range. No stored files exist for this channel.`,
+        )
+      }
+
+      throw new Error(
+        `No packets found for vehicle ${vehicleId} channel ${channel} in requested range. Approx available range: ${channelCoverage.approx_first_packet_time} to ${channelCoverage.approx_last_packet_time}.`,
+      )
+    }
+
     if (!fs.existsSync(h264Path) || fs.statSync(h264Path).size === 0) {
       throw new Error('No H264 payload found for that vehicle/timeframe')
     }
@@ -155,6 +177,8 @@ class ExportController {
       channel,
       requestedFrom: requestedFrom.toISOString(),
       requestedTo: requestedTo.toISOString(),
+      exportFrom: new Date(fromMs).toISOString(),
+      exportTo: new Date(toMs).toISOString(),
       packetCount,
       byteCount,
       frameCount,
