@@ -289,6 +289,53 @@ function isPreviewKeyFrameBuffer(frameBuffer) {
   })
 }
 
+function hasRequiredParameterSets(frameBuffer) {
+  if (!frameBuffer?.length || !findAnnexBStart(frameBuffer)) {
+    return false
+  }
+
+  let hasH264Sps = false
+  let hasH264Pps = false
+  let hasH265Vps = false
+  let hasH265Sps = false
+  let hasH265Pps = false
+
+  for (const nal of splitAnnexBNals(frameBuffer)) {
+    const nalType = getNalType(nal)
+    if (!nalType) {
+      continue
+    }
+
+    if (nalType.h264 === 7) {
+      hasH264Sps = true
+    } else if (nalType.h264 === 8) {
+      hasH264Pps = true
+    }
+
+    if (nalType.h265 === 32) {
+      hasH265Vps = true
+    } else if (nalType.h265 === 33) {
+      hasH265Sps = true
+    } else if (nalType.h265 === 34) {
+      hasH265Pps = true
+    }
+  }
+
+  if (hasH265Vps || hasH265Sps || hasH265Pps) {
+    return hasH265Vps && hasH265Sps && hasH265Pps
+  }
+
+  if (hasH264Sps || hasH264Pps) {
+    return hasH264Sps && hasH264Pps
+  }
+
+  return false
+}
+
+function isDecodableSyncFrameBuffer(frameBuffer) {
+  return isKeyFrameBuffer(frameBuffer) && hasRequiredParameterSets(frameBuffer)
+}
+
 module.exports = {
   parsePacket,
   createFrameAssembler,
@@ -296,4 +343,6 @@ module.exports = {
   splitAnnexBNals,
   isKeyFrameBuffer,
   isPreviewKeyFrameBuffer,
+  hasRequiredParameterSets,
+  isDecodableSyncFrameBuffer,
 }

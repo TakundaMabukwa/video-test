@@ -2,7 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const config = require('./config')
-const { createFrameAssembler } = require('./jt1078')
+const { createFrameAssembler, isDecodableSyncFrameBuffer } = require('./jt1078')
 const {
   getStreamDir,
   getPlaylistPath,
@@ -86,6 +86,10 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
   function closeState(key, state) {
     streamStates.delete(key)
 
+    destroyFfmpeg(state)
+  }
+
+  function destroyFfmpeg(state) {
     try {
       if (state.ffmpeg?.stdin && !state.ffmpeg.stdin.destroyed) {
         state.ffmpeg.stdin.end()
@@ -105,6 +109,15 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
         } catch {}
       }, 2000).unref()
     }
+
+    state.ffmpeg = null
+    state.backpressure = false
+    state.pendingFrames.length = 0
+  }
+
+  function resetForNextSyncFrame(state) {
+    destroyFfmpeg(state)
+    state.waitingForSyncFrame = true
   }
 
   function flushPending(state) {
@@ -146,21 +159,33 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
       return state
     }
 
-    clearStreamFiles(vehicleId, channel)
-    const ffmpeg = spawn('ffmpeg', buildFfmpegArgs(vehicleId, channel))
-
     state = {
       key,
       vehicleId,
       channel,
       assembler: createFrameAssembler(),
-      ffmpeg,
+      ffmpeg: null,
       pendingFrames: [],
       backpressure: false,
       sequence: 0,
       lastPacketAt: 0,
       lastError: null,
+      waitingForSyncFrame: true,
     }
+
+    streamStates.set(key, state)
+    return state
+  }
+
+  function startFfmpeg(state) {
+    if (state.ffmpeg && !state.ffmpeg.killed) {
+      return
+    }
+
+    clearStreamFiles(state.vehicleId, state.channel)
+    const ffmpeg = spawn('ffmpeg', buildFfmpegArgs(state.vehicleId, state.channel))
+    state.ffmpeg = ffmpeg
+    state.lastError = null
 
     ffmpeg.stdin.on('drain', () => {
       flushPending(state)
@@ -168,15 +193,13 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
 
     ffmpeg.stdin.on('error', (error) => {
       const detail = error?.message || String(error)
-      if (String(error?.code || '') === 'EPIPE') {
-        state.lastError = detail
-        return
-      }
-
       state.lastError = detail
-      console.error(
-        `Live HLS stdin error for ${state.vehicleId} ch${state.channel}: ${detail}`,
-      )
+      if (String(error?.code || '') !== 'EPIPE') {
+        console.error(
+          `Live HLS stdin error for ${state.vehicleId} ch${state.channel}: ${detail}`,
+        )
+      }
+      resetForNextSyncFrame(state)
     })
 
     let stderr = ''
@@ -189,21 +212,26 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
       console.error(
         `Live HLS ffmpeg error for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
       )
-      closeState(key, state)
+      resetForNextSyncFrame(state)
     })
 
     ffmpeg.on('close', (code) => {
-      if (code !== 0 && !state.lastError) {
-        state.lastError = stderr.trim() || `ffmpeg exited with code ${code}`
+      if (state.ffmpeg !== ffmpeg) {
+        return
+      }
+
+      if (code !== 0) {
+        state.lastError = stderr.trim() || state.lastError || `ffmpeg exited with code ${code}`
         console.error(
           `Live HLS render failed for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
         )
       }
-      streamStates.delete(key)
-    })
 
-    streamStates.set(key, state)
-    return state
+      state.ffmpeg = null
+      state.backpressure = false
+      state.pendingFrames.length = 0
+      state.waitingForSyncFrame = true
+    })
   }
 
   function handlePacket(meta, payloadBuffer) {
@@ -233,6 +261,19 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
     }
 
     for (const frame of frames) {
+      if (state.waitingForSyncFrame) {
+        if (!isDecodableSyncFrameBuffer(frame.buffer)) {
+          continue
+        }
+
+        startFfmpeg(state)
+        state.waitingForSyncFrame = false
+      }
+
+      if (!state.ffmpeg) {
+        continue
+      }
+
       state.sequence += 1
       state.pendingFrames.push({
         buffer: frame.buffer,
