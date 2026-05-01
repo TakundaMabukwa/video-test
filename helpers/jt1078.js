@@ -269,10 +269,31 @@ function isKeyFrameBuffer(frameBuffer) {
   return splitAnnexBNals(frameBuffer).some((nal) => isKeyFrameNal(getNalType(nal)))
 }
 
+function isPreviewKeyFrameBuffer(frameBuffer) {
+  if (!frameBuffer?.length || !findAnnexBStart(frameBuffer)) {
+    return false
+  }
+
+  return splitAnnexBNals(frameBuffer).some((nal) => {
+    const nalType = getNalType(nal)
+    if (!nalType) {
+      return false
+    }
+
+    return (
+      nalType.h264 === 5 ||
+      nalType.h265 === 19 ||
+      nalType.h265 === 20 ||
+      nalType.h265 === 21
+    )
+  })
+}
+
 module.exports = {
   parsePacket,
   createFrameAssembler,
   findAnnexBStart,
   splitAnnexBNals,
   isKeyFrameBuffer,
+  isPreviewKeyFrameBuffer,
 }

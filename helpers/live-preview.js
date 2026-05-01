@@ -1,6 +1,6 @@
 const { spawn } = require('child_process')
 const config = require('./config')
-const { createFrameAssembler, isKeyFrameBuffer } = require('./jt1078')
+const { createFrameAssembler, isPreviewKeyFrameBuffer } = require('./jt1078')
 const { writeLatestPreview } = require('./live-preview-state')
 
 function buildVideoFilter() {
@@ -107,6 +107,19 @@ function createLivePreviewManager() {
       stdoutChunks.push(chunk)
     })
 
+    ffmpeg.stdin.on('error', (error) => {
+      const detail = error?.message || String(error)
+      if (String(error?.code || '') === 'EPIPE') {
+        state.lastError = detail
+        return
+      }
+
+      state.lastError = detail
+      console.error(
+        `Live preview stdin error for ${state.vehicleId} ch${state.channel}: ${detail}`,
+      )
+    })
+
     ffmpeg.stderr.on('data', (chunk) => {
       stderrChunks.push(chunk)
     })
@@ -182,7 +195,7 @@ function createLivePreviewManager() {
       if (now - state.lastFrameSubmittedAt < frameIntervalMs) {
         continue
       }
-      if (!isKeyFrameBuffer(frame.buffer)) {
+      if (!isPreviewKeyFrameBuffer(frame.buffer)) {
         continue
       }
 
