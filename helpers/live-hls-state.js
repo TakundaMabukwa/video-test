@@ -111,6 +111,62 @@ function readLiveHlsStatus(vehicleId, channel) {
   return readJsonFile(getStatusPath(vehicleId, channel))
 }
 
+function listActiveLiveHlsStreams({ maxAgeMs = null } = {}) {
+  if (!fs.existsSync(LIVE_HLS_ROOT)) {
+    return []
+  }
+
+  const rows = []
+  const now = Date.now()
+  const vehicleDirs = fs.readdirSync(LIVE_HLS_ROOT, { withFileTypes: true })
+
+  for (const vehicleEntry of vehicleDirs) {
+    if (!vehicleEntry.isDirectory()) {
+      continue
+    }
+
+    const vehiclePath = path.join(LIVE_HLS_ROOT, vehicleEntry.name)
+    const channelDirs = fs.readdirSync(vehiclePath, { withFileTypes: true })
+    for (const channelEntry of channelDirs) {
+      if (!channelEntry.isDirectory()) {
+        continue
+      }
+
+      const statusPath = path.join(vehiclePath, channelEntry.name, 'status.json')
+      if (!fs.existsSync(statusPath)) {
+        continue
+      }
+
+      try {
+        const meta = JSON.parse(fs.readFileSync(statusPath, 'utf8'))
+        const channel = Number(meta?.channel || 0)
+        const vehicleId = String(meta?.vehicleId || '').trim()
+        const updatedAtMs = Number(meta?.updatedAtMs || 0)
+        const playlistPath = getPlaylistPath(vehicleId, channel)
+
+        if (!vehicleId || !Number.isFinite(channel) || channel <= 0) {
+          continue
+        }
+        if (!fs.existsSync(playlistPath) || fs.statSync(playlistPath).size <= 0) {
+          continue
+        }
+        if (
+          Number.isFinite(Number(maxAgeMs)) &&
+          Number(maxAgeMs) > 0 &&
+          Number.isFinite(updatedAtMs) &&
+          now - updatedAtMs > Number(maxAgeMs)
+        ) {
+          continue
+        }
+
+        rows.push(meta)
+      } catch {}
+    }
+  }
+
+  return rows.sort((a, b) => Number(b.updatedAtMs || 0) - Number(a.updatedAtMs || 0))
+}
+
 function touchLiveHlsRequest({
   vehicleId,
   channel,
@@ -155,6 +211,7 @@ module.exports = {
   clearStreamFiles,
   writeLiveHlsStatus,
   readLiveHlsStatus,
+  listActiveLiveHlsStreams,
   touchLiveHlsRequest,
   readLiveHlsRequest,
   hasRecentLiveHlsRequest,

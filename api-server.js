@@ -29,6 +29,7 @@ async function start() {
   app.get('/health', apiController.health)
   app.get('/api/ingest/stats', apiController.ingestStats)
   app.get('/api/live/streams', apiController.activeLiveStreams)
+  app.get('/api/live-hls/streams', apiController.activeLiveHlsStreams)
   app.get('/api/vehicles/:vehicleId/live.mjpeg', apiController.vehicleMjpeg)
   app.get('/api/vehicles/:vehicleId/screenshot', apiController.vehicleScreenshot)
   app.get('/api/vehicles/:vehicleId/live-hls/:channel/playlist.m3u8', apiController.vehicleLiveHlsPlaylist)

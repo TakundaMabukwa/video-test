@@ -3,6 +3,7 @@ const { summarizeCoverageForRange, summarizeVehicleApproxCoverage } = require('.
 const { listActivePreviewStreams, readLatestPreview } = require('../helpers/live-preview-state')
 const {
   getPlaylistPath,
+  listActiveLiveHlsStreams,
   readLiveHlsStatus,
   touchLiveHlsRequest,
 } = require('../helpers/live-hls-state')
@@ -91,6 +92,23 @@ class ApiController {
     try {
       const maxAgeMs = Number(req.query?.maxAgeMs || config.livePreviewMaxAgeMs)
       const rows = listActivePreviewStreams({ maxAgeMs })
+      return res.status(200).json({
+        success: true,
+        count: rows.length,
+        rows,
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
+  activeLiveHlsStreams = (req, res) => {
+    try {
+      const maxAgeMs = Number(req.query?.maxAgeMs || config.liveHlsMaxAgeMs)
+      const rows = listActiveLiveHlsStreams({ maxAgeMs })
       return res.status(200).json({
         success: true,
         count: rows.length,
