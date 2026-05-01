@@ -1,4 +1,6 @@
 const { summarizeCoverageForRange, summarizeVehicleApproxCoverage } = require('../helpers/storage')
+const { listActivePreviewStreams, readLatestPreview } = require('../helpers/live-preview-state')
+const config = require('../helpers/config')
 const { readIngestStats, readIngestRelayStats } = require('../helpers/runtime-state')
 
 class ApiController {
@@ -30,6 +32,11 @@ class ApiController {
           .map((value) => Number(String(value).trim()))
 
     return [...new Set(values.filter((value) => Number.isFinite(value) && value > 0))]
+  }
+
+  parseChannel(value, fallback = 1) {
+    const parsed = Number(value ?? fallback)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
   }
 
   buildExportRequest(req) {
@@ -72,6 +79,176 @@ class ApiController {
 
   health(req, res) {
     res.json({ success: true, status: 'ok' })
+  }
+
+  activeLiveStreams = (req, res) => {
+    try {
+      const maxAgeMs = Number(req.query?.maxAgeMs || config.livePreviewMaxAgeMs)
+      const rows = listActivePreviewStreams({ maxAgeMs })
+      return res.status(200).json({
+        success: true,
+        count: rows.length,
+        rows,
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
+  vehicleScreenshot = async (req, res) => {
+    try {
+      const vehicleId = String(req.params?.vehicleId || '').trim()
+      const channel = this.parseChannel(req.query?.channel, 1)
+      const maxAgeMs = Number(req.query?.maxAgeMs || 0)
+
+      if (!vehicleId) {
+        return res.status(400).json({
+          success: false,
+          message: 'vehicleId is required',
+        })
+      }
+
+      const preview = readLatestPreview(vehicleId, channel)
+      if (!preview) {
+        return res.status(404).json({
+          success: false,
+          message: 'No live preview frame available yet for that vehicle/channel.',
+        })
+      }
+
+      const updatedAtMs = Number(preview.meta?.updatedAtMs || 0)
+      const isStale = Number.isFinite(maxAgeMs) && maxAgeMs > 0
+        ? Date.now() - updatedAtMs > maxAgeMs
+        : false
+      if (isStale) {
+        return res.status(404).json({
+          success: false,
+          message: 'Latest live preview frame is older than requested maxAgeMs.',
+        })
+      }
+
+      res.setHeader('Content-Type', 'image/jpeg')
+      res.setHeader('Content-Length', String(preview.jpegBuffer.length))
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+      res.setHeader('X-Preview-Updated-At', String(preview.meta?.updatedAt || ''))
+      res.setHeader('X-Preview-Sequence', String(preview.meta?.sequence ?? ''))
+      return res.status(200).send(preview.jpegBuffer)
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
+  async waitForPreview(vehicleId, channel, waitMs, maxAgeMs) {
+    const deadline = Date.now() + Math.max(0, Number(waitMs || 0))
+    const pollMs = Math.max(100, Number(config.livePreviewPollMs || 250))
+
+    while (Date.now() <= deadline) {
+      const preview = readLatestPreview(vehicleId, channel)
+      if (preview) {
+        const updatedAtMs = Number(preview.meta?.updatedAtMs || 0)
+        const isFresh =
+          !Number.isFinite(Number(maxAgeMs)) ||
+          Number(maxAgeMs) <= 0 ||
+          Date.now() - updatedAtMs <= Number(maxAgeMs)
+        if (isFresh) {
+          return preview
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
+    }
+
+    return null
+  }
+
+  vehicleMjpeg = async (req, res) => {
+    const vehicleId = String(req.params?.vehicleId || '').trim()
+    const channel = this.parseChannel(req.query?.channel, 1)
+    const waitMs = Number(req.query?.waitMs || config.livePreviewWaitMs)
+    const maxAgeMs = Number(req.query?.maxAgeMs || config.livePreviewMaxAgeMs)
+    const boundary = 'frame'
+
+    if (!vehicleId) {
+      return res.status(400).json({
+        success: false,
+        message: 'vehicleId is required',
+      })
+    }
+
+    try {
+      let preview = await this.waitForPreview(vehicleId, channel, waitMs, maxAgeMs)
+      if (!preview) {
+        return res.status(404).json({
+          success: false,
+          message: 'No live preview frames became available in time for that vehicle/channel.',
+        })
+      }
+
+      res.status(200)
+      res.setHeader('Content-Type', `multipart/x-mixed-replace; boundary=${boundary}`)
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+      res.setHeader('Connection', 'keep-alive')
+
+      let lastSequence = Number(preview.meta?.sequence || 0)
+      const writeFrame = (frame) => {
+        res.write(
+          `--${boundary}\r\n` +
+            'Content-Type: image/jpeg\r\n' +
+            `Content-Length: ${frame.jpegBuffer.length}\r\n` +
+            `X-Preview-Updated-At: ${frame.meta?.updatedAt || ''}\r\n\r\n`,
+        )
+        res.write(frame.jpegBuffer)
+        res.write('\r\n')
+      }
+
+      writeFrame(preview)
+
+      const interval = setInterval(() => {
+        preview = readLatestPreview(vehicleId, channel)
+        if (!preview) {
+          return
+        }
+
+        const updatedAtMs = Number(preview.meta?.updatedAtMs || 0)
+        if (
+          Number.isFinite(maxAgeMs) &&
+          maxAgeMs > 0 &&
+          Date.now() - updatedAtMs > maxAgeMs
+        ) {
+          return
+        }
+
+        const sequence = Number(preview.meta?.sequence || 0)
+        if (sequence <= lastSequence) {
+          return
+        }
+
+        lastSequence = sequence
+        writeFrame(preview)
+      }, Math.max(100, Number(config.livePreviewPollMs || 250)))
+
+      const cleanup = () => {
+        clearInterval(interval)
+        try {
+          res.end(`--${boundary}--\r\n`)
+        } catch {}
+      }
+
+      req.on('close', cleanup)
+      req.on('aborted', cleanup)
+      return undefined
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
   }
 
   ingestStats = (req, res) => {

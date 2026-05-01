@@ -8,6 +8,7 @@ const {
   RETENTION_DAYS,
 } = require('../helpers/storage')
 const { parsePacket } = require('../helpers/jt1078')
+const { createLivePreviewManager } = require('../helpers/live-preview')
 const { writeIngestStats } = require('../helpers/runtime-state')
 
 class PacketController {
@@ -36,6 +37,7 @@ class PacketController {
     this.lastLoggedMissingPackets = 0
     this.lastLoggedUnrecoverablePackets = 0
     this.lastRetentionRunAt = 0
+    this.livePreviewManager = createLivePreviewManager()
     this.retentionTimer = setInterval(() => {
       void this.runRetentionCleanup()
     }, 60 * 60 * 1000)
@@ -102,6 +104,13 @@ class PacketController {
         sequenceNumber: parsedPacket.sequence,
         packetTimestampMs,
       })
+    }
+
+    try {
+      this.livePreviewManager.handlePacket(meta, payloadBuffer)
+    } catch (error) {
+      this.lastUnrecoverableError = error.message || String(error)
+      console.error('Live preview pipeline failed:', this.lastUnrecoverableError)
     }
 
     return storageRecord.filePath
@@ -204,6 +213,7 @@ class PacketController {
     }
 
     await closeStorageStreams()
+    await this.livePreviewManager.close()
     this.persistRuntimeStats()
   }
 

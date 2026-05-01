@@ -30,6 +30,59 @@ Successful channel results include:
 
 If no packets are found in the requested range, the channel result includes a clear message with approximate available range.
 
+## Live Preview Bridge
+
+This sandbox can now turn incoming live JT1078 packets into browser-friendly preview frames without the older HLS stack.
+
+Worker-side flow:
+
+1. Queue worker assembles raw packets into H264 frames.
+2. A lightweight FFmpeg sidecar converts those frames into JPEG previews.
+3. Latest frames are cached under `runtime/live-preview/...`.
+4. API serves those frames as:
+   - single screenshots
+   - multipart MJPEG live preview
+
+### Endpoints
+
+List active preview streams:
+
+```bash
+curl "http://127.0.0.1:3201/api/live/streams"
+```
+
+Get latest screenshot:
+
+```bash
+curl "http://127.0.0.1:3201/api/vehicles/<vehicleId>/screenshot?channel=1" --output latest.jpg
+```
+
+Open MJPEG live preview:
+
+```bash
+curl "http://127.0.0.1:3201/api/vehicles/<vehicleId>/live.mjpeg?channel=1"
+```
+
+In a browser, the MJPEG endpoint can be used directly in an `<img>` tag:
+
+```html
+<img src="http://127.0.0.1:3201/api/vehicles/221085886967/live.mjpeg?channel=1" />
+```
+
+### Tuning
+
+```env
+LIVE_PREVIEW_ENABLED=true
+LIVE_PREVIEW_FPS=4
+LIVE_PREVIEW_WIDTH=960
+LIVE_PREVIEW_JPEG_QUALITY=6
+LIVE_PREVIEW_IDLE_MS=15000
+LIVE_PREVIEW_WAIT_MS=10000
+LIVE_PREVIEW_MAX_AGE_MS=15000
+```
+
+This path is meant for reliable live dashboard previews and screenshot capture. It does not replace full archive export.
+
 ## Durable Packet Buffer (JetStream)
 
 This project now uses a durable middle layer:

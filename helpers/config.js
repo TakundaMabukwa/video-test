@@ -87,4 +87,12 @@ module.exports = {
   natsConsumeExpiresMs: getNumber('NATS_CONSUME_EXPIRES_MS', 30000),
   natsConsumeIdleHeartbeatMs: getNumber('NATS_CONSUME_IDLE_HEARTBEAT_MS', 5000),
   queueWorkerEnabled: getBoolean('QUEUE_WORKER_ENABLED', true),
+  livePreviewEnabled: getBoolean('LIVE_PREVIEW_ENABLED', true),
+  livePreviewFps: getNumber('LIVE_PREVIEW_FPS', 4),
+  livePreviewWidth: getNumber('LIVE_PREVIEW_WIDTH', 960),
+  livePreviewJpegQuality: getNumber('LIVE_PREVIEW_JPEG_QUALITY', 6),
+  livePreviewIdleMs: getNumber('LIVE_PREVIEW_IDLE_MS', 15000),
+  livePreviewPollMs: getNumber('LIVE_PREVIEW_POLL_MS', 250),
+  livePreviewWaitMs: getNumber('LIVE_PREVIEW_WAIT_MS', 10000),
+  livePreviewMaxAgeMs: getNumber('LIVE_PREVIEW_MAX_AGE_MS', 15000),
 }
