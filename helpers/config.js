@@ -113,6 +113,8 @@ module.exports = {
   livePreviewWaitMs: getNumber('LIVE_PREVIEW_WAIT_MS', 10000),
   livePreviewMaxAgeMs: getNumber('LIVE_PREVIEW_MAX_AGE_MS', 45000),
   liveHlsEnabled: getBoolean('LIVE_HLS_ENABLED', true),
+  liveHlsAlwaysOn: getBoolean('LIVE_HLS_ALWAYS_ON', true),
+  liveHlsIdleMs: getNumber('LIVE_HLS_IDLE_MS', 20000),
   liveHlsRequestTtlMs: getNumber('LIVE_HLS_REQUEST_TTL_MS', 30000),
   liveHlsWaitMs: getNumber('LIVE_HLS_WAIT_MS', 15000),
   liveHlsMaxAgeMs: getNumber('LIVE_HLS_MAX_AGE_MS', 20000),

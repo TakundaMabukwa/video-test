@@ -61,15 +61,22 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
   const streamStates = new Map()
 
   const idleSweepTimer = setInterval(() => {
+    const now = Date.now()
     for (const [key, state] of streamStates.entries()) {
-      if (
-        hasRecentLiveHlsRequest(
-          state.vehicleId,
-          state.channel,
-          config.liveHlsRequestTtlMs,
-        )
-      ) {
-        continue
+      if (config.liveHlsAlwaysOn) {
+        if (now - Number(state.lastPacketAt || 0) <= config.liveHlsIdleMs) {
+          continue
+        }
+      } else {
+        if (
+          hasRecentLiveHlsRequest(
+            state.vehicleId,
+            state.channel,
+            config.liveHlsRequestTtlMs,
+          )
+        ) {
+          continue
+        }
       }
       closeState(key, state)
     }
@@ -151,6 +158,7 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
       pendingFrames: [],
       backpressure: false,
       sequence: 0,
+      lastPacketAt: 0,
       lastError: null,
     }
 
@@ -205,7 +213,11 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
       return
     }
 
-    if (!hasRecentLiveHlsRequest(vehicleId, channel, config.liveHlsRequestTtlMs)) {
+    const requested =
+      config.liveHlsAlwaysOn ||
+      hasRecentLiveHlsRequest(vehicleId, channel, config.liveHlsRequestTtlMs)
+
+    if (!requested) {
       const existing = streamStates.get(`${vehicleId}:${channel}`)
       if (existing) {
         closeState(existing.key, existing)
@@ -214,6 +226,7 @@ function createLiveHlsManager({ source = 'preview' } = {}) {
     }
 
     const state = ensureState(vehicleId, channel)
+    state.lastPacketAt = Date.now()
     const frames = state.assembler.pushPacket(payloadBuffer)
     if (!frames.length) {
       return
