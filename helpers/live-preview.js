@@ -1,10 +1,7 @@
 const { spawn } = require('child_process')
 const config = require('./config')
-const { createFrameAssembler } = require('./jt1078')
+const { createFrameAssembler, isKeyFrameBuffer } = require('./jt1078')
 const { writeLatestPreview } = require('./live-preview-state')
-
-const JPEG_SOI = Buffer.from([0xff, 0xd8])
-const JPEG_EOI = Buffer.from([0xff, 0xd9])
 
 function buildVideoFilter() {
   if (!Number.isFinite(config.livePreviewWidth) || config.livePreviewWidth <= 0) {
@@ -13,37 +10,35 @@ function buildVideoFilter() {
   return `scale=${config.livePreviewWidth}:-1`
 }
 
-function extractJpegs(buffer) {
-  const images = []
-  let cursor = 0
-  let current = buffer
+function buildFfmpegArgs() {
+  const args = [
+    '-loglevel',
+    'error',
+    '-f',
+    'h264',
+    '-i',
+    'pipe:0',
+  ]
 
-  while (current.length) {
-    const start = current.indexOf(JPEG_SOI, cursor)
-    if (start < 0) {
-      return {
-        images,
-        remainder: Buffer.alloc(0),
-      }
-    }
-
-    const end = current.indexOf(JPEG_EOI, start + JPEG_SOI.length)
-    if (end < 0) {
-      return {
-        images,
-        remainder: current.slice(start),
-      }
-    }
-
-    images.push(current.slice(start, end + JPEG_EOI.length))
-    current = current.slice(end + JPEG_EOI.length)
-    cursor = 0
+  const videoFilter = buildVideoFilter()
+  if (videoFilter) {
+    args.push('-vf', videoFilter)
   }
 
-  return {
-    images,
-    remainder: Buffer.alloc(0),
-  }
+  args.push(
+    '-frames:v',
+    '1',
+    '-an',
+    '-f',
+    'image2pipe',
+    '-vcodec',
+    'mjpeg',
+    '-q:v',
+    String(config.livePreviewJpegQuality),
+    'pipe:1',
+  )
+
+  return args
 }
 
 function createLivePreviewManager() {
@@ -69,12 +64,6 @@ function createLivePreviewManager() {
 
   function closeState(key, state) {
     streamStates.delete(key)
-    try {
-      state.ffmpeg?.stdin?.end()
-    } catch {}
-    try {
-      state.ffmpeg?.kill('SIGTERM')
-    } catch {}
   }
 
   function ensureState(vehicleId, channel) {
@@ -89,92 +78,88 @@ function createLivePreviewManager() {
       vehicleId,
       channel,
       assembler: createFrameAssembler(),
-      ffmpeg: null,
-      stdoutBuffer: Buffer.alloc(0),
       lastPacketAt: 0,
       lastFrameSubmittedAt: 0,
       frameSequence: 0,
       lastFrameTimestampMs: null,
       lastError: null,
+      renderInFlight: false,
     }
     streamStates.set(key, state)
     return state
   }
 
-  function ensureFfmpeg(state) {
-    if (state.ffmpeg && !state.ffmpeg.killed && state.ffmpeg.exitCode === null) {
-      return state.ffmpeg
+  function renderPreviewFrame(state, frameBuffer, frameTimestampMs) {
+    if (state.renderInFlight) {
+      return
     }
 
-    const videoFilter = buildVideoFilter()
-    const ffmpegArgs = [
-      '-loglevel',
-      'error',
-      '-fflags',
-      'nobuffer',
-      '-flags',
-      'low_delay',
-      '-f',
-      'h264',
-      '-i',
-      'pipe:0',
-      '-an',
-      '-f',
-      'image2pipe',
-      '-vcodec',
-      'mjpeg',
-      '-q:v',
-      String(config.livePreviewJpegQuality),
-      'pipe:1',
-    ]
+    state.renderInFlight = true
+    state.lastFrameTimestampMs = Number.isFinite(Number(frameTimestampMs))
+      ? Number(frameTimestampMs)
+      : null
 
-    if (videoFilter) {
-      ffmpegArgs.splice(10, 0, '-vf', videoFilter)
-    }
-
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs)
-
-    state.ffmpeg = ffmpeg
-    state.stdoutBuffer = Buffer.alloc(0)
+    const ffmpeg = spawn('ffmpeg', buildFfmpegArgs())
+    const stdoutChunks = []
+    const stderrChunks = []
 
     ffmpeg.stdout.on('data', (chunk) => {
-      state.stdoutBuffer = Buffer.concat([state.stdoutBuffer, chunk])
-      const { images, remainder } = extractJpegs(state.stdoutBuffer)
-      state.stdoutBuffer = remainder
-
-      for (const jpegBuffer of images) {
-        state.frameSequence += 1
-        writeLatestPreview({
-          vehicleId: state.vehicleId,
-          channel: state.channel,
-          jpegBuffer,
-          frameTimestampMs: state.lastFrameTimestampMs,
-          sequence: state.frameSequence,
-        })
-      }
+      stdoutChunks.push(chunk)
     })
 
     ffmpeg.stderr.on('data', (chunk) => {
-      state.lastError = chunk.toString('utf8').trim() || state.lastError
+      stderrChunks.push(chunk)
     })
 
     ffmpeg.on('error', (error) => {
+      state.renderInFlight = false
       state.lastError = error.message || String(error)
-      closeState(state.key, state)
+      console.error(
+        `Live preview render error for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
+      )
     })
 
-    ffmpeg.on('close', () => {
-      if (state.lastError) {
+    ffmpeg.on('close', (code) => {
+      state.renderInFlight = false
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim()
+      if (stderr) {
+        state.lastError = stderr
+      }
+
+      if (code !== 0) {
         console.error(
-          `Live preview ffmpeg closed for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
+          `Live preview render failed for ${state.vehicleId} ch${state.channel}: ${stderr || `ffmpeg exited with code ${code}`}`,
         )
+        return
       }
-      if (streamStates.get(state.key) === state) {
-        streamStates.delete(state.key)
+
+      const jpegBuffer = Buffer.concat(stdoutChunks)
+      if (!jpegBuffer.length) {
+        return
       }
+
+      state.frameSequence += 1
+      writeLatestPreview({
+        vehicleId: state.vehicleId,
+        channel: state.channel,
+        jpegBuffer,
+        frameTimestampMs: state.lastFrameTimestampMs,
+        sequence: state.frameSequence,
+      })
     })
 
-    return ffmpeg
+    try {
+      ffmpeg.stdin.end(frameBuffer)
+    } catch (error) {
+      state.renderInFlight = false
+      state.lastError = error.message || String(error)
+      console.error(
+        `Live preview stdin close failed for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
+      )
+      try {
+        ffmpeg.kill('SIGTERM')
+      } catch {}
+    }
   }
 
   function handlePacket(meta, payloadBuffer) {
@@ -192,25 +177,17 @@ function createLivePreviewManager() {
       return
     }
 
-    const ffmpeg = ensureFfmpeg(state)
     for (const frame of frames) {
       const now = Date.now()
       if (now - state.lastFrameSubmittedAt < frameIntervalMs) {
         continue
       }
+      if (!isKeyFrameBuffer(frame.buffer)) {
+        continue
+      }
 
       state.lastFrameSubmittedAt = now
-      state.lastFrameTimestampMs = Number.isFinite(Number(frame.timestamp))
-        ? Number(frame.timestamp)
-        : null
-
-      try {
-        ffmpeg.stdin.write(frame.buffer)
-      } catch (error) {
-        state.lastError = error.message || String(error)
-        closeState(state.key, state)
-        break
-      }
+      renderPreviewFrame(state, frame.buffer, frame.timestamp)
     }
   }
 

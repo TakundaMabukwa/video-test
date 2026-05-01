@@ -261,9 +261,18 @@ function createFrameAssembler() {
   }
 }
 
+function isKeyFrameBuffer(frameBuffer) {
+  if (!frameBuffer?.length || !findAnnexBStart(frameBuffer)) {
+    return false
+  }
+
+  return splitAnnexBNals(frameBuffer).some((nal) => isKeyFrameNal(getNalType(nal)))
+}
+
 module.exports = {
   parsePacket,
   createFrameAssembler,
   findAnnexBStart,
   splitAnnexBNals,
+  isKeyFrameBuffer,
 }
