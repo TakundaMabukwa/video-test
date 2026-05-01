@@ -41,7 +41,7 @@ function buildFfmpegArgs() {
   return args
 }
 
-function createLivePreviewManager() {
+function createLivePreviewManager({ source = 'preview' } = {}) {
   if (!config.livePreviewEnabled) {
     return {
       handlePacket() {},
@@ -158,6 +158,7 @@ function createLivePreviewManager() {
         jpegBuffer,
         frameTimestampMs: state.lastFrameTimestampMs,
         sequence: state.frameSequence,
+        source,
       })
     })
 

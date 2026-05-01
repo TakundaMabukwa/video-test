@@ -37,7 +37,12 @@ class PacketController {
     this.lastLoggedMissingPackets = 0
     this.lastLoggedUnrecoverablePackets = 0
     this.lastRetentionRunAt = 0
-    this.livePreviewManager = createLivePreviewManager()
+    this.livePreviewManager = config.livePreviewFromWorker
+      ? createLivePreviewManager({ source: 'worker' })
+      : {
+          handlePacket() {},
+          async close() {},
+        }
     this.retentionTimer = setInterval(() => {
       void this.runRetentionCleanup()
     }, 60 * 60 * 1000)

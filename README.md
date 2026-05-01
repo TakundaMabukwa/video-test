@@ -34,14 +34,21 @@ If no packets are found in the requested range, the channel result includes a cl
 
 This sandbox can now turn incoming live JT1078 packets into browser-friendly preview frames without the older HLS stack.
 
-Worker-side flow:
+Ingress-side live flow:
 
-1. Queue worker assembles raw packets into H264 frames.
-2. A lightweight FFmpeg sidecar converts those frames into JPEG previews.
-3. Latest frames are cached under `runtime/live-preview/...`.
-4. API serves those frames as:
+1. `video-feed-ingest` receives relay packets in real time.
+2. Ingest assembles raw packets into H264 frames immediately as they arrive.
+3. A lightweight FFmpeg sidecar converts those frames into JPEG previews.
+4. Latest frames are cached under `runtime/live-preview/...`.
+5. API serves those frames as:
    - single screenshots
    - multipart MJPEG live preview
+
+Archive/storage flow remains separate:
+
+1. `video-feed-ingest` also publishes the same packets into JetStream.
+2. `video-feed-worker` consumes JetStream for durable storage/indexing.
+3. Queue backlog no longer drives the live preview path.
 
 ### Endpoints
 
@@ -73,6 +80,7 @@ In a browser, the MJPEG endpoint can be used directly in an `<img>` tag:
 
 ```env
 LIVE_PREVIEW_ENABLED=true
+LIVE_PREVIEW_SOURCE=ingest
 LIVE_PREVIEW_FPS=4
 LIVE_PREVIEW_WIDTH=960
 LIVE_PREVIEW_JPEG_QUALITY=6
@@ -80,6 +88,13 @@ LIVE_PREVIEW_IDLE_MS=15000
 LIVE_PREVIEW_WAIT_MS=10000
 LIVE_PREVIEW_MAX_AGE_MS=15000
 ```
+
+`LIVE_PREVIEW_SOURCE` options:
+
+- `ingest` (default): live preview follows incoming relay packets directly
+- `worker`: live preview follows queued worker processing
+- `both`: both processes may write preview frames
+- `none`: disable preview generation
 
 This path is meant for reliable live dashboard previews and screenshot capture. It does not replace full archive export.
 

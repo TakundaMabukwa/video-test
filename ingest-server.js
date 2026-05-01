@@ -2,6 +2,7 @@ const net = require('net')
 const config = require('./helpers/config')
 const { createPacketQueue } = require('./helpers/packet-queue')
 const { writeIngestRelayStats } = require('./helpers/runtime-state')
+const { createLivePreviewManager } = require('./helpers/live-preview')
 
 const HOST = config.relayHost
 const PORT = config.relayPort
@@ -19,6 +20,12 @@ async function start() {
   await packetQueue.ensureStream()
   await packetQueue.ensureConsumer()
   console.log('Ingest startup: JetStream ready')
+  const livePreviewManager = config.livePreviewFromIngest
+    ? createLivePreviewManager({ source: 'ingest' })
+    : {
+        handlePacket() {},
+        async close() {},
+      }
 
   let buffer = Buffer.alloc(0)
   let shuttingDown = false
@@ -193,6 +200,14 @@ async function start() {
 
       try {
         const meta = JSON.parse(metaBuffer.toString('utf8'))
+        try {
+          livePreviewManager.handlePacket(meta, payloadBuffer)
+        } catch (error) {
+          console.error(
+            'Ingest live preview pipeline failed:',
+            error?.message || String(error),
+          )
+        }
         queuePacket(meta, payloadBuffer)
       } catch (error) {
         relayStats.metadataParseErrors += 1
@@ -279,6 +294,12 @@ async function start() {
     }
 
     await persistRelayStats({ refreshQueueDepth: true })
+
+    try {
+      await livePreviewManager.close()
+    } catch (error) {
+      console.error('Live preview shutdown failed:', error.message || String(error))
+    }
 
     try {
       await packetQueue.close()

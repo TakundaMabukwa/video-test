@@ -53,6 +53,16 @@ function getBoolean(name, fallback = false) {
   return fallback
 }
 
+function getLivePreviewSource() {
+  const value = getString('LIVE_PREVIEW_SOURCE', 'ingest').toLowerCase()
+  if (['ingest', 'worker', 'both', 'none'].includes(value)) {
+    return value
+  }
+  return 'ingest'
+}
+
+const livePreviewSource = getLivePreviewSource()
+
 module.exports = {
   relayHost: getString('RELAY_HOST', '209.38.206.44'),
   relayPort: getNumber('RELAY_PORT', 7081),
@@ -88,6 +98,13 @@ module.exports = {
   natsConsumeIdleHeartbeatMs: getNumber('NATS_CONSUME_IDLE_HEARTBEAT_MS', 5000),
   queueWorkerEnabled: getBoolean('QUEUE_WORKER_ENABLED', true),
   livePreviewEnabled: getBoolean('LIVE_PREVIEW_ENABLED', true),
+  livePreviewSource,
+  livePreviewFromIngest:
+    getBoolean('LIVE_PREVIEW_ENABLED', true) &&
+    (livePreviewSource === 'ingest' || livePreviewSource === 'both'),
+  livePreviewFromWorker:
+    getBoolean('LIVE_PREVIEW_ENABLED', true) &&
+    (livePreviewSource === 'worker' || livePreviewSource === 'both'),
   livePreviewFps: getNumber('LIVE_PREVIEW_FPS', 4),
   livePreviewWidth: getNumber('LIVE_PREVIEW_WIDTH', 960),
   livePreviewJpegQuality: getNumber('LIVE_PREVIEW_JPEG_QUALITY', 6),

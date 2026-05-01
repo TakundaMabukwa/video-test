@@ -43,6 +43,7 @@ function writeLatestPreview({
   frameTimestampMs = null,
   updatedAtMs = Date.now(),
   sequence = null,
+  source = null,
 }) {
   ensureDir(vehicleId, channel)
 
@@ -55,6 +56,7 @@ function writeLatestPreview({
       ? Number(frameTimestampMs)
       : null,
     sequence: Number.isFinite(Number(sequence)) ? Number(sequence) : null,
+    source: source ? String(source) : null,
     byteLength: Buffer.byteLength(jpegBuffer),
   }
 
