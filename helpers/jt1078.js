@@ -57,7 +57,6 @@ function getNalType(nalBuffer) {
   const header = nalBuffer[headerIndex]
   return {
     h264: header & 0x1f,
-    h265: (header >> 1) & 0x3f,
   }
 }
 
@@ -66,16 +65,7 @@ function isKeyFrameNal(nalType) {
     return false
   }
 
-  return (
-    nalType.h264 === 5 ||
-    nalType.h264 === 7 ||
-    nalType.h264 === 8 ||
-    nalType.h265 === 19 ||
-    nalType.h265 === 20 ||
-    nalType.h265 === 32 ||
-    nalType.h265 === 33 ||
-    nalType.h265 === 34
-  )
+  return nalType.h264 === 5
 }
 
 function prependParameterSets(frameBuffer, parameterSets) {
@@ -84,7 +74,7 @@ function prependParameterSets(frameBuffer, parameterSets) {
     existingNals
       .map((nal) => getNalType(nal))
       .filter(Boolean)
-      .flatMap((nalType) => [nalType.h264, nalType.h265]),
+      .map((nalType) => nalType.h264),
   )
 
   const prefixes = []
@@ -99,7 +89,7 @@ function prependParameterSets(frameBuffer, parameterSets) {
       continue
     }
 
-    if (existingTypes.has(nalType.h264) || existingTypes.has(nalType.h265)) {
+    if (existingTypes.has(nalType.h264)) {
       continue
     }
 
@@ -120,12 +110,10 @@ function cacheParameterSets(frameBuffer, parameterSets) {
       continue
     }
 
-    if (nalType.h264 === 7 || nalType.h265 === 33) {
+    if (nalType.h264 === 7) {
       parameterSets.sps = Buffer.from(nal)
-    } else if (nalType.h264 === 8 || nalType.h265 === 34) {
+    } else if (nalType.h264 === 8) {
       parameterSets.pps = Buffer.from(nal)
-    } else if (nalType.h265 === 32) {
-      parameterSets.vps = Buffer.from(nal)
     }
   }
 }
@@ -160,7 +148,6 @@ function parsePacket(packetBuffer) {
 
 function createFrameAssembler() {
   const parameterSets = {
-    vps: null,
     sps: null,
     pps: null,
   }
@@ -281,10 +268,7 @@ function isPreviewKeyFrameBuffer(frameBuffer) {
     }
 
     return (
-      nalType.h264 === 5 ||
-      nalType.h265 === 19 ||
-      nalType.h265 === 20 ||
-      nalType.h265 === 21
+      nalType.h264 === 5
     )
   })
 }
@@ -296,9 +280,6 @@ function hasRequiredParameterSets(frameBuffer) {
 
   let hasH264Sps = false
   let hasH264Pps = false
-  let hasH265Vps = false
-  let hasH265Sps = false
-  let hasH265Pps = false
 
   for (const nal of splitAnnexBNals(frameBuffer)) {
     const nalType = getNalType(nal)
@@ -311,18 +292,6 @@ function hasRequiredParameterSets(frameBuffer) {
     } else if (nalType.h264 === 8) {
       hasH264Pps = true
     }
-
-    if (nalType.h265 === 32) {
-      hasH265Vps = true
-    } else if (nalType.h265 === 33) {
-      hasH265Sps = true
-    } else if (nalType.h265 === 34) {
-      hasH265Pps = true
-    }
-  }
-
-  if (hasH265Vps || hasH265Sps || hasH265Pps) {
-    return hasH265Vps && hasH265Sps && hasH265Pps
   }
 
   if (hasH264Sps || hasH264Pps) {
@@ -333,7 +302,7 @@ function hasRequiredParameterSets(frameBuffer) {
 }
 
 function isDecodableSyncFrameBuffer(frameBuffer) {
-  return isKeyFrameBuffer(frameBuffer) && hasRequiredParameterSets(frameBuffer)
+  return isPreviewKeyFrameBuffer(frameBuffer) && hasRequiredParameterSets(frameBuffer)
 }
 
 module.exports = {
