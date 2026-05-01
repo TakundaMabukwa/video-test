@@ -1,5 +1,11 @@
+const fs = require('fs')
 const { summarizeCoverageForRange, summarizeVehicleApproxCoverage } = require('../helpers/storage')
 const { listActivePreviewStreams, readLatestPreview } = require('../helpers/live-preview-state')
+const {
+  getPlaylistPath,
+  readLiveHlsStatus,
+  touchLiveHlsRequest,
+} = require('../helpers/live-hls-state')
 const config = require('../helpers/config')
 const { readIngestStats, readIngestRelayStats } = require('../helpers/runtime-state')
 
@@ -167,6 +173,37 @@ class ApiController {
     return null
   }
 
+  async waitForLiveHls(vehicleId, channel, waitMs, maxAgeMs) {
+    const deadline = Date.now() + Math.max(0, Number(waitMs || 0))
+    const pollMs = Math.max(100, Number(config.livePreviewPollMs || 250))
+
+    while (Date.now() <= deadline) {
+      const status = readLiveHlsStatus(vehicleId, channel)
+      const playlistPath = getPlaylistPath(vehicleId, channel)
+      const hasPlaylist =
+        fs.existsSync(playlistPath) && fs.statSync(playlistPath).size > 0
+      const updatedAtMs = Number(status?.updatedAtMs || 0)
+      const isFresh =
+        Number.isFinite(updatedAtMs) &&
+        (
+          !Number.isFinite(Number(maxAgeMs)) ||
+          Number(maxAgeMs) <= 0 ||
+          Date.now() - updatedAtMs <= Number(maxAgeMs)
+        )
+
+      if (status && hasPlaylist && isFresh) {
+        return {
+          status,
+          playlistPath,
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
+    }
+
+    return null
+  }
+
   vehicleMjpeg = async (req, res) => {
     const vehicleId = String(req.params?.vehicleId || '').trim()
     const channel = this.parseChannel(req.query?.channel, 1)
@@ -243,6 +280,47 @@ class ApiController {
       req.on('close', cleanup)
       req.on('aborted', cleanup)
       return undefined
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
+  vehicleLiveHlsPlaylist = async (req, res) => {
+    const vehicleId = String(req.params?.vehicleId || '').trim()
+    const channel = this.parseChannel(req.params?.channel, 1)
+    const waitMs = Number(req.query?.waitMs || config.liveHlsWaitMs)
+    const maxAgeMs = Number(req.query?.maxAgeMs || config.liveHlsMaxAgeMs)
+
+    if (!vehicleId) {
+      return res.status(400).json({
+        success: false,
+        message: 'vehicleId is required',
+      })
+    }
+
+    try {
+      touchLiveHlsRequest({
+        vehicleId,
+        channel,
+      })
+
+      const ready = await this.waitForLiveHls(vehicleId, channel, waitMs, maxAgeMs)
+      if (!ready) {
+        return res.status(404).json({
+          success: false,
+          message: 'No live HLS stream became available in time for that vehicle/channel.',
+        })
+      }
+
+      const playlistText = fs.readFileSync(ready.playlistPath, 'utf8')
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+      res.setHeader('X-Live-Source', String(ready.status?.source || 'unknown'))
+      res.setHeader('X-Live-Updated-At', String(ready.status?.updatedAt || ''))
+      return res.status(200).send(playlistText)
     } catch (error) {
       return res.status(500).json({
         success: false,

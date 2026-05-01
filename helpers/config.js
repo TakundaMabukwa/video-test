@@ -112,4 +112,11 @@ module.exports = {
   livePreviewPollMs: getNumber('LIVE_PREVIEW_POLL_MS', 250),
   livePreviewWaitMs: getNumber('LIVE_PREVIEW_WAIT_MS', 10000),
   livePreviewMaxAgeMs: getNumber('LIVE_PREVIEW_MAX_AGE_MS', 45000),
+  liveHlsEnabled: getBoolean('LIVE_HLS_ENABLED', true),
+  liveHlsRequestTtlMs: getNumber('LIVE_HLS_REQUEST_TTL_MS', 30000),
+  liveHlsWaitMs: getNumber('LIVE_HLS_WAIT_MS', 15000),
+  liveHlsMaxAgeMs: getNumber('LIVE_HLS_MAX_AGE_MS', 20000),
+  liveHlsSegmentTimeSec: getNumber('LIVE_HLS_SEGMENT_TIME_SEC', 1),
+  liveHlsListSize: getNumber('LIVE_HLS_LIST_SIZE', 6),
+  liveHlsDeleteThreshold: getNumber('LIVE_HLS_DELETE_THRESHOLD', 2),
 }

@@ -2,6 +2,7 @@ const express = require('express')
 const config = require('./helpers/config')
 const { ExportController, EXPORT_ROOT } = require('./controllers/export-controller')
 const { ApiController } = require('./controllers/api-controller')
+const { LIVE_HLS_ROOT } = require('./helpers/live-hls-state')
 
 async function start() {
   console.log('API startup: file-first mode ready')
@@ -15,11 +16,22 @@ async function start() {
   const app = express()
   app.use(express.json())
   app.use('/media/exports', express.static(EXPORT_ROOT))
+  app.use('/media/live-hls', express.static(LIVE_HLS_ROOT, {
+    setHeaders(res, filePath) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+      if (filePath.endsWith('.m3u8')) {
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+      } else if (filePath.endsWith('.ts')) {
+        res.setHeader('Content-Type', 'video/mp2t')
+      }
+    },
+  }))
   app.get('/health', apiController.health)
   app.get('/api/ingest/stats', apiController.ingestStats)
   app.get('/api/live/streams', apiController.activeLiveStreams)
   app.get('/api/vehicles/:vehicleId/live.mjpeg', apiController.vehicleMjpeg)
   app.get('/api/vehicles/:vehicleId/screenshot', apiController.vehicleScreenshot)
+  app.get('/api/vehicles/:vehicleId/live-hls/:channel/playlist.m3u8', apiController.vehicleLiveHlsPlaylist)
   app.get('/api/video/coverage', apiController.coverage)
   app.get('/api/vehicles/:vehicleId/video/availability', apiController.vehicleAvailability)
   app.get('/api/vehicles/:vehicleId/video', apiController.exportVehicleRange)

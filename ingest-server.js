@@ -3,6 +3,7 @@ const config = require('./helpers/config')
 const { createPacketQueue } = require('./helpers/packet-queue')
 const { writeIngestRelayStats } = require('./helpers/runtime-state')
 const { createLivePreviewManager } = require('./helpers/live-preview')
+const { createLiveHlsManager } = require('./helpers/live-hls')
 
 const HOST = config.relayHost
 const PORT = config.relayPort
@@ -26,6 +27,7 @@ async function start() {
         handlePacket() {},
         async close() {},
       }
+  const liveHlsManager = createLiveHlsManager({ source: 'ingest' })
 
   let buffer = Buffer.alloc(0)
   let shuttingDown = false
@@ -208,6 +210,14 @@ async function start() {
             error?.message || String(error),
           )
         }
+        try {
+          liveHlsManager.handlePacket(meta, payloadBuffer)
+        } catch (error) {
+          console.error(
+            'Ingest live HLS pipeline failed:',
+            error?.message || String(error),
+          )
+        }
         queuePacket(meta, payloadBuffer)
       } catch (error) {
         relayStats.metadataParseErrors += 1
@@ -299,6 +309,12 @@ async function start() {
       await livePreviewManager.close()
     } catch (error) {
       console.error('Live preview shutdown failed:', error.message || String(error))
+    }
+
+    try {
+      await liveHlsManager.close()
+    } catch (error) {
+      console.error('Live HLS shutdown failed:', error.message || String(error))
     }
 
     try {
