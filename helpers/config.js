@@ -94,5 +94,5 @@ module.exports = {
   livePreviewIdleMs: getNumber('LIVE_PREVIEW_IDLE_MS', 15000),
   livePreviewPollMs: getNumber('LIVE_PREVIEW_POLL_MS', 250),
   livePreviewWaitMs: getNumber('LIVE_PREVIEW_WAIT_MS', 10000),
-  livePreviewMaxAgeMs: getNumber('LIVE_PREVIEW_MAX_AGE_MS', 15000),
+  livePreviewMaxAgeMs: getNumber('LIVE_PREVIEW_MAX_AGE_MS', 45000),
 }
