@@ -6,11 +6,11 @@ const { writeLatestPreview } = require('./live-preview-state')
 const JPEG_SOI = Buffer.from([0xff, 0xd8])
 const JPEG_EOI = Buffer.from([0xff, 0xd9])
 
-function buildScaleFilter() {
+function buildVideoFilter() {
   if (!Number.isFinite(config.livePreviewWidth) || config.livePreviewWidth <= 0) {
-    return `fps=${config.livePreviewFps}`
+    return ''
   }
-  return `fps=${config.livePreviewFps},scale=${config.livePreviewWidth}:-1`
+  return `scale=${config.livePreviewWidth}:-1`
 }
 
 function extractJpegs(buffer) {
@@ -106,7 +106,8 @@ function createLivePreviewManager() {
       return state.ffmpeg
     }
 
-    const ffmpeg = spawn('ffmpeg', [
+    const videoFilter = buildVideoFilter()
+    const ffmpegArgs = [
       '-loglevel',
       'error',
       '-fflags',
@@ -117,8 +118,6 @@ function createLivePreviewManager() {
       'h264',
       '-i',
       'pipe:0',
-      '-vf',
-      buildScaleFilter(),
       '-an',
       '-f',
       'image2pipe',
@@ -127,7 +126,13 @@ function createLivePreviewManager() {
       '-q:v',
       String(config.livePreviewJpegQuality),
       'pipe:1',
-    ])
+    ]
+
+    if (videoFilter) {
+      ffmpegArgs.splice(10, 0, '-vf', videoFilter)
+    }
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs)
 
     state.ffmpeg = ffmpeg
     state.stdoutBuffer = Buffer.alloc(0)
@@ -159,6 +164,11 @@ function createLivePreviewManager() {
     })
 
     ffmpeg.on('close', () => {
+      if (state.lastError) {
+        console.error(
+          `Live preview ffmpeg closed for ${state.vehicleId} ch${state.channel}: ${state.lastError}`,
+        )
+      }
       if (streamStates.get(state.key) === state) {
         streamStates.delete(state.key)
       }
