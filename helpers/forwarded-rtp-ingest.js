@@ -56,7 +56,7 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
     }
 
     queueInitAttempted = true
-    if (!config.queueWorkerEnabled) {
+    if (!config.queueWorkerEnabled || !config.forwardedQueueMirrorEnabled) {
       queueReady = false
       stats.lastEnqueueError = null
       persistStats()
@@ -121,6 +121,9 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
   }
 
   function mirrorToQueue(meta, payloadBuffer) {
+    if (!config.forwardedQueueMirrorEnabled) {
+      return
+    }
     if (!queueReady || !packetQueue) {
       return
     }
@@ -262,6 +265,7 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
       ...stats,
       queueReady,
       queueInitAttempted,
+      forwardedQueueMirrorEnabled: !!config.forwardedQueueMirrorEnabled,
       archiveWriteFromIngest: !!config.archiveWriteFromIngest,
       livePreviewFromIngest: !!config.livePreviewFromIngest,
       liveHlsEnabled: !!config.liveHlsEnabled,

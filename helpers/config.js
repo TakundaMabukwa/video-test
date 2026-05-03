@@ -109,6 +109,7 @@ module.exports = {
   natsConsumeExpiresMs: getNumber('NATS_CONSUME_EXPIRES_MS', 30000),
   natsConsumeIdleHeartbeatMs: getNumber('NATS_CONSUME_IDLE_HEARTBEAT_MS', 5000),
   queueWorkerEnabled: getBoolean('QUEUE_WORKER_ENABLED', true),
+  forwardedQueueMirrorEnabled: getBoolean('FORWARDED_QUEUE_MIRROR_ENABLED', false),
   livePreviewEnabled: getBoolean('LIVE_PREVIEW_ENABLED', true),
   livePreviewSource,
   archiveWriteSource,
