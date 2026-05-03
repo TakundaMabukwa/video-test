@@ -55,6 +55,13 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
     }
 
     queueInitAttempted = true
+    if (!config.queueWorkerEnabled) {
+      queueReady = false
+      stats.lastEnqueueError = null
+      persistStats()
+      return
+    }
+
     try {
       packetQueue = await createPacketQueue({ role: 'api-forwarded' })
       await packetQueue.ensureStream()
