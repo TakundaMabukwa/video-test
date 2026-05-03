@@ -4,6 +4,10 @@ const path = require('path')
 const RUNTIME_DIR = path.join(process.cwd(), 'runtime')
 const INGEST_STATS_PATH = path.join(RUNTIME_DIR, 'ingest-stats.json')
 const INGEST_RELAY_STATS_PATH = path.join(RUNTIME_DIR, 'ingest-relay-stats.json')
+const FORWARDED_INGEST_STATS_PATH = path.join(
+  RUNTIME_DIR,
+  'forwarded-ingest-stats.json',
+)
 
 function ensureDir() {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true })
@@ -51,11 +55,35 @@ function readIngestRelayStats() {
   }
 }
 
+function writeForwardedIngestStats(stats) {
+  ensureDir()
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    stats,
+  }
+  fs.writeFileSync(FORWARDED_INGEST_STATS_PATH, JSON.stringify(payload, null, 2))
+}
+
+function readForwardedIngestStats() {
+  if (!fs.existsSync(FORWARDED_INGEST_STATS_PATH)) {
+    return null
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(FORWARDED_INGEST_STATS_PATH, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 module.exports = {
   INGEST_STATS_PATH,
   INGEST_RELAY_STATS_PATH,
+  FORWARDED_INGEST_STATS_PATH,
   writeIngestStats,
   readIngestStats,
   writeIngestRelayStats,
   readIngestRelayStats,
+  writeForwardedIngestStats,
+  readForwardedIngestStats,
 }

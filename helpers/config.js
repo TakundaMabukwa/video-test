@@ -61,12 +61,23 @@ function getLivePreviewSource() {
   return 'ingest'
 }
 
+function getArchiveWriteSource() {
+  const value = getString('ARCHIVE_WRITE_SOURCE', 'ingest').toLowerCase()
+  if (['ingest', 'worker', 'both', 'none'].includes(value)) {
+    return value
+  }
+  return 'ingest'
+}
+
 const livePreviewSource = getLivePreviewSource()
+const archiveWriteSource = getArchiveWriteSource()
 
 module.exports = {
   relayHost: getString('RELAY_HOST', '209.38.206.44'),
   relayPort: getNumber('RELAY_PORT', 7081),
+  relayIngestEnabled: getBoolean('RELAY_INGEST_ENABLED', true),
   apiPort: getNumber('API_PORT', 3201),
+  internalWorkerToken: getString('INTERNAL_WORKER_TOKEN', ''),
   dbHost: getString('DB_HOST', '127.0.0.1'),
   dbPort: getNumber('DB_PORT', 5432),
   dbName: getString('DB_NAME', 'video_storage'),
@@ -84,9 +95,10 @@ module.exports = {
   natsSubject: getString('NATS_SUBJECT', 'video.packet'),
   natsConsumerName: getString('NATS_CONSUMER_NAME', 'video-packet-writer'),
   natsPublishTimeoutMs: getNumber('NATS_PUBLISH_TIMEOUT_MS', 5000),
-  natsStreamMaxAgeMs: getNumber('NATS_STREAM_MAX_AGE_MS', 72 * 60 * 60 * 1000),
+  natsStreamMaxAgeMs: getNumber('NATS_STREAM_MAX_AGE_MS', 0),
   natsDuplicateWindowMs: getNumber('NATS_DUPLICATE_WINDOW_MS', 2 * 60 * 1000),
-  natsStreamMaxBytes: getNumber('NATS_STREAM_MAX_BYTES', 50 * 1024 * 1024 * 1024),
+  natsStreamMaxBytes: getNumber('NATS_STREAM_MAX_BYTES', 0),
+  natsAckWaitMs: getNumber('NATS_ACK_WAIT_MS', 5 * 60 * 1000),
   natsConsumerMaxAckPending: getNumber('NATS_CONSUMER_MAX_ACK_PENDING', 20000),
   natsConsumerMaxDeliver: getNumber('NATS_CONSUMER_MAX_DELIVER', -1),
   natsConsumerInactiveThresholdMs: getNumber(
@@ -99,6 +111,12 @@ module.exports = {
   queueWorkerEnabled: getBoolean('QUEUE_WORKER_ENABLED', true),
   livePreviewEnabled: getBoolean('LIVE_PREVIEW_ENABLED', true),
   livePreviewSource,
+  archiveWriteSource,
+  archiveWriteFromIngest:
+    archiveWriteSource === 'ingest' || archiveWriteSource === 'both',
+  archiveWriteFromWorker:
+    archiveWriteSource === 'worker' || archiveWriteSource === 'both',
+  retentionDays: Math.max(0, getNumber('RETENTION_DAYS', 0)),
   livePreviewFromIngest:
     getBoolean('LIVE_PREVIEW_ENABLED', true) &&
     (livePreviewSource === 'ingest' || livePreviewSource === 'both'),

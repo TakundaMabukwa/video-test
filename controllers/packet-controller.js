@@ -13,6 +13,8 @@ const { writeIngestStats } = require('../helpers/runtime-state')
 
 class PacketController {
   constructor() {
+    this.archiveWriteEnabled = !!config.archiveWriteFromWorker
+    this.retentionEnabled = this.archiveWriteEnabled && RETENTION_DAYS > 0
     this.sequenceResetGapThreshold = 1000
     this.sequenceResetTimeThresholdMs = 5000
     this.rawOutput = config.mirrorRawOutput
@@ -43,10 +45,14 @@ class PacketController {
           handlePacket() {},
           async close() {},
         }
-    this.retentionTimer = setInterval(() => {
-      void this.runRetentionCleanup()
-    }, 60 * 60 * 1000)
-    this.retentionTimer.unref()
+    this.retentionTimer = this.retentionEnabled
+      ? setInterval(() => {
+          void this.runRetentionCleanup()
+        }, 60 * 60 * 1000)
+      : null
+    if (this.retentionTimer) {
+      this.retentionTimer.unref()
+    }
     this.statsTimer = setInterval(() => {
       this.logStats()
     }, config.statsLogMs)
@@ -54,10 +60,12 @@ class PacketController {
   }
 
   async initialize() {
-    void this.runRetentionCleanup().catch((error) => {
-      this.lastUnrecoverableError = error.message || String(error)
-      console.error('Background retention cleanup failed:', this.lastUnrecoverableError)
-    })
+    if (this.retentionEnabled) {
+      void this.runRetentionCleanup().catch((error) => {
+        this.lastUnrecoverableError = error.message || String(error)
+        console.error('Background retention cleanup failed:', this.lastUnrecoverableError)
+      })
+    }
     this.persistRuntimeStats()
   }
 
@@ -76,25 +84,27 @@ class PacketController {
     }
 
     let storageRecord = null
-    try {
-      storageRecord = appendPacket(meta, payloadBuffer)
-    } catch (error) {
-      this.recordUndurableDrop({
-        reason: 'file-write-failed',
-        payloadLength: payloadBuffer.length,
-        meta,
-        error,
-      })
-      return null
-    }
+    if (this.archiveWriteEnabled) {
+      try {
+        storageRecord = appendPacket(meta, payloadBuffer)
+      } catch (error) {
+        this.recordUndurableDrop({
+          reason: 'file-write-failed',
+          payloadLength: payloadBuffer.length,
+          meta,
+          error,
+        })
+        return null
+      }
 
-    if (!storageRecord) {
-      this.recordUndurableDrop({
-        reason: 'invalid-storage-identity',
-        payloadLength: payloadBuffer.length,
-        meta,
-      })
-      return null
+      if (!storageRecord) {
+        this.recordUndurableDrop({
+          reason: 'invalid-storage-identity',
+          payloadLength: payloadBuffer.length,
+          meta,
+        })
+        return null
+      }
     }
 
     const vehicleId = String(meta.vehicleId || '').trim()
@@ -118,7 +128,7 @@ class PacketController {
       console.error('Live preview pipeline failed:', this.lastUnrecoverableError)
     }
 
-    return storageRecord.filePath
+    return storageRecord?.filePath || null
   }
 
   recordUndurableDrop({ reason, payloadLength = 0, meta = null, error = null }) {
@@ -150,6 +160,9 @@ class PacketController {
   }
 
   async runRetentionCleanup() {
+    if (!this.retentionEnabled) {
+      return
+    }
     const now = Date.now()
     if (now - this.lastRetentionRunAt < 60 * 1000) {
       return
@@ -211,7 +224,9 @@ class PacketController {
 
   async close() {
     clearInterval(this.statsTimer)
-    clearInterval(this.retentionTimer)
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer)
+    }
 
     if (this.rawOutput) {
       await new Promise((resolve) => this.rawOutput.end(resolve))
@@ -278,7 +293,7 @@ class PacketController {
       pendingDbRows: 0,
       pendingGapRows: 0,
       reindexInProgress: false,
-      retentionDays: RETENTION_DAYS,
+      retentionDays: this.retentionEnabled ? RETENTION_DAYS : 0,
       sequenceGapEvents: this.sequenceGapEvents,
       sequenceGapPackets: this.sequenceGapPackets,
       insertedGapEvents: 0,

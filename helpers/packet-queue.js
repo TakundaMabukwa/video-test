@@ -58,16 +58,23 @@ function isResourceMissingError(error) {
 }
 
 function createStreamConfig() {
-  return {
+  const streamConfig = {
     name: config.natsStreamName,
     subjects: [config.natsSubject],
     retention: RetentionPolicy.Workqueue,
     storage: StorageType.File,
     discard: DiscardPolicy.Old,
-    max_age: nanos(config.natsStreamMaxAgeMs),
-    max_bytes: config.natsStreamMaxBytes,
     duplicate_window: nanos(config.natsDuplicateWindowMs),
   }
+
+  if (Number.isFinite(config.natsStreamMaxAgeMs) && config.natsStreamMaxAgeMs > 0) {
+    streamConfig.max_age = nanos(config.natsStreamMaxAgeMs)
+  }
+  if (Number.isFinite(config.natsStreamMaxBytes) && config.natsStreamMaxBytes > 0) {
+    streamConfig.max_bytes = config.natsStreamMaxBytes
+  }
+
+  return streamConfig
 }
 
 function createConsumerConfig() {
@@ -93,24 +100,32 @@ async function createPacketQueue({ role = 'app' } = {}) {
   const jsm = await nc.jetstreamManager()
 
   async function ensureStream() {
+    const desiredConfig = createStreamConfig()
     try {
       await jsm.streams.info(config.natsStreamName)
+      await jsm.streams.update(config.natsStreamName, desiredConfig)
     } catch (error) {
       if (!isResourceMissingError(error)) {
         throw error
       }
-      await jsm.streams.add(createStreamConfig())
+      await jsm.streams.add(desiredConfig)
     }
   }
 
   async function ensureConsumer() {
+    const desiredConfig = createConsumerConfig()
     try {
       await jsm.consumers.info(config.natsStreamName, config.natsConsumerName)
+      await jsm.consumers.update(
+        config.natsStreamName,
+        config.natsConsumerName,
+        desiredConfig,
+      )
     } catch (error) {
       if (!isResourceMissingError(error)) {
         throw error
       }
-      await jsm.consumers.add(config.natsStreamName, createConsumerConfig())
+      await jsm.consumers.add(config.natsStreamName, desiredConfig)
     }
   }
 

@@ -4,6 +4,7 @@ const { createPacketQueue } = require('./helpers/packet-queue')
 const { writeIngestRelayStats } = require('./helpers/runtime-state')
 const { createLivePreviewManager } = require('./helpers/live-preview')
 const { createLiveHlsManager } = require('./helpers/live-hls')
+const { appendPacket, closeStorageStreams } = require('./helpers/storage')
 
 const HOST = config.relayHost
 const PORT = config.relayPort
@@ -14,6 +15,48 @@ const MAX_INFLIGHT_PUBLISH = 10000
 const RESUME_INFLIGHT_PUBLISH = 3000
 
 async function start() {
+  if (!config.relayIngestEnabled) {
+    console.log('Ingest startup: relay ingest disabled by RELAY_INGEST_ENABLED=false')
+    writeIngestRelayStats({
+      relayHost: HOST,
+      relayPort: PORT,
+      relayIngestEnabled: false,
+      receivedPackets: 0,
+      receivedBytes: 0,
+      enqueuedPackets: 0,
+      enqueueErrors: 0,
+      droppedPackets: 0,
+      archivedPackets: 0,
+      archiveWriteErrors: 0,
+      metadataParseErrors: 0,
+      inflightPublishes: 0,
+      pausedForBackpressure: false,
+      relayReconnectAttempt: 0,
+      queueDepthMessages: null,
+      lastQueueInfoError: null,
+      lastRelayConnectAt: null,
+      lastRelayDisconnectAt: null,
+      lastRelayError: null,
+      lastEnqueueError: null,
+      lastArchiveError: null,
+      lastEnqueueAckSequence: null,
+    })
+
+    let keepAliveTimer = setInterval(() => {}, 60 * 60 * 1000)
+    const shutdown = () => {
+      if (keepAliveTimer) {
+        clearInterval(keepAliveTimer)
+        keepAliveTimer = null
+      }
+      console.log('Ingest shutting down...')
+      process.exit(0)
+    }
+
+    process.on('SIGINT', shutdown)
+    process.on('SIGTERM', shutdown)
+    return
+  }
+
   console.log('Ingest startup: queue-first mode ready')
   console.log('Ingest startup: connecting to JetStream...')
 
@@ -49,6 +92,8 @@ async function start() {
     enqueuedPackets: 0,
     enqueueErrors: 0,
     droppedPackets: 0,
+    archivedPackets: 0,
+    archiveWriteErrors: 0,
     metadataParseErrors: 0,
     inflightPublishes: 0,
     pausedForBackpressure: false,
@@ -59,6 +104,7 @@ async function start() {
     lastRelayDisconnectAt: null,
     lastRelayError: null,
     lastEnqueueError: null,
+    lastArchiveError: null,
     lastEnqueueAckSequence: null,
   }
 
@@ -182,6 +228,30 @@ async function start() {
       })
   }
 
+  const archivePacket = (meta, payloadBuffer) => {
+    if (!config.archiveWriteFromIngest) {
+      return
+    }
+
+    try {
+      const record = appendPacket(meta, payloadBuffer)
+      if (!record) {
+        relayStats.archiveWriteErrors += 1
+        relayStats.lastArchiveError = 'invalid-storage-identity'
+        console.error('Primary archive write skipped: invalid storage identity')
+        return
+      }
+      relayStats.archivedPackets += 1
+      relayStats.lastArchiveError = null
+    } catch (error) {
+      relayStats.archiveWriteErrors += 1
+      relayStats.lastArchiveError = error.message || String(error)
+      console.error(
+        `Primary archive write failed: ${relayStats.lastArchiveError}`,
+      )
+    }
+  }
+
   const handleData = (chunk) => {
     buffer = Buffer.concat([buffer, chunk])
 
@@ -202,6 +272,7 @@ async function start() {
 
       try {
         const meta = JSON.parse(metaBuffer.toString('utf8'))
+        archivePacket(meta, payloadBuffer)
         try {
           livePreviewManager.handlePacket(meta, payloadBuffer)
         } catch (error) {
@@ -315,6 +386,14 @@ async function start() {
       await liveHlsManager.close()
     } catch (error) {
       console.error('Live HLS shutdown failed:', error.message || String(error))
+    }
+
+    try {
+      if (config.archiveWriteFromIngest) {
+        await closeStorageStreams()
+      }
+    } catch (error) {
+      console.error('Archive storage shutdown failed:', error.message || String(error))
     }
 
     try {

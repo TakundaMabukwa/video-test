@@ -1,9 +1,10 @@
 const fs = require('fs')
 const path = require('path')
+const config = require('./config')
 
 const HEADER_SIZE = 12
 const STORAGE_ROOT = path.join(process.cwd(), 'storage')
-const RETENTION_DAYS = 3
+const RETENTION_DAYS = Math.max(0, Number(config.retentionDays || 0))
 const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
 
 const fileStates = new Map()
@@ -423,6 +424,13 @@ function removeEmptyDirectories(startPath, stopAt = STORAGE_ROOT) {
 }
 
 function cleanupExpiredPacketFiles(nowMs = Date.now()) {
+  if (RETENTION_DAYS <= 0 || RETENTION_MS <= 0) {
+    return {
+      cutoffMs: null,
+      deletedFiles: [],
+    }
+  }
+
   const cutoffMs = nowMs - RETENTION_MS
   const deletedFiles = []
 

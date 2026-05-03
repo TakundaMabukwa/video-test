@@ -3,18 +3,33 @@ const config = require('./helpers/config')
 const { ExportController, EXPORT_ROOT } = require('./controllers/export-controller')
 const { ApiController } = require('./controllers/api-controller')
 const { LIVE_HLS_ROOT } = require('./helpers/live-hls-state')
+const {
+  createForwardedRtpIngestPipeline,
+} = require('./helpers/forwarded-rtp-ingest')
+
+function isAuthorized(req) {
+  const expected = String(config.internalWorkerToken || '').trim()
+  if (!expected) {
+    return true
+  }
+  return String(req.header('X-Internal-Token') || '').trim() === expected
+}
 
 async function start() {
   console.log('API startup: file-first mode ready')
 
   const exportController = new ExportController()
+  const forwardedRtpIngest = createForwardedRtpIngestPipeline({
+    source: 'listener-forward',
+  })
+  await forwardedRtpIngest.initializeQueue()
   const apiController = new ApiController({
     exportController,
-    packetController: null,
+    packetController: forwardedRtpIngest,
   })
 
   const app = express()
-  app.use(express.json())
+  app.use(express.json({ limit: '25mb' }))
   app.use('/media/exports', express.static(EXPORT_ROOT))
   app.use('/media/live-hls', express.static(LIVE_HLS_ROOT, {
     setHeaders(res, filePath) {
@@ -33,6 +48,28 @@ async function start() {
   app.get('/api/vehicles/:vehicleId/live.mjpeg', apiController.vehicleMjpeg)
   app.get('/api/vehicles/:vehicleId/screenshot', apiController.vehicleScreenshot)
   app.get('/api/vehicles/:vehicleId/live-hls/:channel/playlist.m3u8', apiController.vehicleLiveHlsPlaylist)
+  app.post('/api/internal/ingest/rtp-batch', async (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden',
+      })
+    }
+
+    try {
+      const packets = Array.isArray(req.body?.packets) ? req.body.packets : []
+      const summary = await forwardedRtpIngest.handleBatch(packets)
+      return res.status(200).json({
+        success: true,
+        ...summary,
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  })
   app.get('/api/video/coverage', apiController.coverage)
   app.get('/api/vehicles/:vehicleId/video/availability', apiController.vehicleAvailability)
   app.get('/api/vehicles/:vehicleId/video', apiController.exportVehicleRange)
@@ -55,6 +92,12 @@ async function start() {
     console.log(reason)
 
     await new Promise((resolve) => apiServer.close(resolve))
+
+    try {
+      await forwardedRtpIngest.close()
+    } catch (error) {
+      console.error('Forwarded RTP ingest shutdown failed:', error.message || String(error))
+    }
 
     try {
       const { closePool } = require('./helpers/db')
