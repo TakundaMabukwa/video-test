@@ -49,7 +49,9 @@ function getOrCreateFileState(filePath) {
 function appendPacket(meta, payloadBuffer) {
   const vehicleId = String(meta.vehicleId || '').trim()
   const channel = Number(meta.channel || 0)
-  const timestampMs = Number(meta.timestamp || Date.now())
+  const timestampMs = Number(
+    meta.archiveTimestampMs ?? meta.receivedAtMs ?? meta.timestamp ?? Date.now(),
+  )
   if (!vehicleId || !Number.isFinite(channel) || channel <= 0) {
     return null
   }

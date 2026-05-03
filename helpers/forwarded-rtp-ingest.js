@@ -35,6 +35,7 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
     lastPacketVehicleId: null,
     lastPacketChannel: null,
     lastPacketTimestampMs: null,
+    lastPacketDeviceTimestampMs: null,
     lastPacketAt: null,
   }
 
@@ -80,11 +81,17 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
     }
   }
 
-  function buildMeta({ vehicleId, transport, parsedPacket }) {
+  function buildMeta({ vehicleId, transport, parsedPacket, receivedAtMs }) {
+    const archiveTimestampMs = Number.isFinite(Number(receivedAtMs))
+      ? Number(receivedAtMs)
+      : Date.now()
     return {
       vehicleId,
       channel: parsedPacket.channel,
       timestamp: parsedPacket.timestamp,
+      deviceTimestampMs: parsedPacket.timestamp,
+      receivedAtMs: archiveTimestampMs,
+      archiveTimestampMs,
       transport,
       source,
     }
@@ -164,6 +171,7 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
     const vehicleId = String(entry?.vehicleId || '').trim()
     const transport = entry?.transport === 'udp' ? 'udp' : 'tcp'
     const packetBase64 = String(entry?.packetBase64 || '').trim()
+    const receivedAtMs = Number(entry?.receivedAtMs || Date.now())
 
     if (!vehicleId || !packetBase64) {
       stats.droppedPackets += 1
@@ -203,9 +211,19 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
       }
     }
 
-    const meta = buildMeta({ vehicleId, transport, parsedPacket })
+    const meta = buildMeta({
+      vehicleId,
+      transport,
+      parsedPacket,
+      receivedAtMs,
+    })
     stats.lastPacketChannel = Number(meta.channel || 0)
-    stats.lastPacketTimestampMs = Number(meta.timestamp || 0)
+    stats.lastPacketTimestampMs = Number(
+      meta.archiveTimestampMs ?? meta.receivedAtMs ?? meta.timestamp ?? 0,
+    )
+    stats.lastPacketDeviceTimestampMs = Number(
+      meta.deviceTimestampMs ?? meta.timestamp ?? 0,
+    )
     stats.lastParseError = null
 
     archivePacket(meta, payloadBuffer)
@@ -216,7 +234,8 @@ function createForwardedRtpIngestPipeline({ source = 'listener-forward' } = {}) 
       success: true,
       vehicleId,
       channel: meta.channel,
-      timestamp: meta.timestamp,
+      timestamp: meta.archiveTimestampMs,
+      deviceTimestamp: meta.deviceTimestampMs,
       transport,
     }
   }
