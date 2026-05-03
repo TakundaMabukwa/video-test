@@ -139,4 +139,9 @@ module.exports = {
   liveHlsSegmentTimeSec: getNumber('LIVE_HLS_SEGMENT_TIME_SEC', 1),
   liveHlsListSize: getNumber('LIVE_HLS_LIST_SIZE', 6),
   liveHlsDeleteThreshold: getNumber('LIVE_HLS_DELETE_THRESHOLD', 2),
+  alertVideoCaptureEnabled: getBoolean('ALERT_VIDEO_CAPTURE_ENABLED', true),
+  alertVideoCapturePreRollMs: getNumber('ALERT_VIDEO_CAPTURE_PRE_ROLL_MS', 30000),
+  alertVideoCapturePostRollMs: getNumber('ALERT_VIDEO_CAPTURE_POST_ROLL_MS', 30000),
+  alertVideoCaptureRetryIntervalMs: getNumber('ALERT_VIDEO_CAPTURE_RETRY_INTERVAL_MS', 5000),
+  alertVideoCaptureWaitTimeoutMs: getNumber('ALERT_VIDEO_CAPTURE_WAIT_TIMEOUT_MS', 180000),
 }

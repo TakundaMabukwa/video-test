@@ -11,9 +11,10 @@ const config = require('../helpers/config')
 const { readIngestStats, readIngestRelayStats } = require('../helpers/runtime-state')
 
 class ApiController {
-  constructor({ exportController, packetController }) {
+  constructor({ exportController, packetController, alertCaptureManager }) {
     this.exportController = exportController
     this.packetController = packetController
+    this.alertCaptureManager = alertCaptureManager
   }
 
   parseTimestampMs(value) {
@@ -86,6 +87,78 @@ class ApiController {
 
   health(req, res) {
     res.json({ success: true, status: 'ok' })
+  }
+
+  requestAlertCapture = async (req, res) => {
+    try {
+      if (!this.alertCaptureManager) {
+        return res.status(503).json({
+          success: false,
+          message: 'Alert capture manager is not available',
+        })
+      }
+
+      const job = this.alertCaptureManager.queueCapture(req.body || {})
+      return res.status(202).json({
+        success: true,
+        job,
+      })
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
+  alertCaptureStatus = async (req, res) => {
+    try {
+      if (!this.alertCaptureManager) {
+        return res.status(503).json({
+          success: false,
+          message: 'Alert capture manager is not available',
+        })
+      }
+
+      const alertId = String(req.params?.alertId || '').trim()
+      if (!alertId) {
+        return res.status(400).json({
+          success: false,
+          message: 'alertId is required',
+        })
+      }
+
+      const job = this.alertCaptureManager.readJob(alertId)
+      if (!job) {
+        return res.status(404).json({
+          success: false,
+          message: 'No alert capture job found for that alertId',
+        })
+      }
+
+      const results = Array.isArray(job.results)
+        ? job.results.map((result) => ({
+            ...result,
+            mp4UrlAbsolute: this.buildAbsoluteMediaUrl(req, result.mp4Url),
+            h264UrlAbsolute: this.buildAbsoluteMediaUrl(req, result.h264Url),
+            rawPacketsUrlAbsolute: this.buildAbsoluteMediaUrl(req, result.rawPacketsUrl),
+            manifestUrlAbsolute: this.buildAbsoluteMediaUrl(req, result.manifestUrl),
+          }))
+        : []
+
+      return res.status(200).json({
+        success: true,
+        job: {
+          ...job,
+          results,
+        },
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
   }
 
   activeLiveStreams = (req, res) => {

@@ -3,6 +3,7 @@ const config = require('./helpers/config')
 const { ExportController, EXPORT_ROOT } = require('./controllers/export-controller')
 const { ApiController } = require('./controllers/api-controller')
 const { LIVE_HLS_ROOT } = require('./helpers/live-hls-state')
+const { AlertCaptureManager, ALERT_CAPTURE_MEDIA_ROOT } = require('./helpers/alert-capture')
 const {
   createForwardedRtpIngestPipeline,
 } = require('./helpers/forwarded-rtp-ingest')
@@ -19,6 +20,9 @@ async function start() {
   console.log('API startup: file-first mode ready')
 
   const exportController = new ExportController()
+  const alertCaptureManager = new AlertCaptureManager({
+    exportController,
+  })
   const forwardedRtpIngest = createForwardedRtpIngestPipeline({
     source: 'listener-forward',
   })
@@ -26,11 +30,13 @@ async function start() {
   const apiController = new ApiController({
     exportController,
     packetController: forwardedRtpIngest,
+    alertCaptureManager,
   })
 
   const app = express()
   app.use(express.json({ limit: '25mb' }))
   app.use('/media/exports', express.static(EXPORT_ROOT))
+  app.use('/media/alert-captures', express.static(ALERT_CAPTURE_MEDIA_ROOT))
   app.use('/media/live-hls', express.static(LIVE_HLS_ROOT, {
     setHeaders(res, filePath) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
@@ -70,6 +76,16 @@ async function start() {
       })
     }
   })
+  app.post('/api/internal/alerts/capture', async (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden',
+      })
+    }
+    return apiController.requestAlertCapture(req, res)
+  })
+  app.get('/api/alerts/:alertId/capture', apiController.alertCaptureStatus)
   app.get('/api/video/coverage', apiController.coverage)
   app.get('/api/vehicles/:vehicleId/video/availability', apiController.vehicleAvailability)
   app.get('/api/vehicles/:vehicleId/video', apiController.exportVehicleRange)
