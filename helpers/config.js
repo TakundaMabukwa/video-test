@@ -145,4 +145,6 @@ module.exports = {
   alertVideoCapturePostRollMs: getNumber('ALERT_VIDEO_CAPTURE_POST_ROLL_MS', 30000),
   alertVideoCaptureRetryIntervalMs: getNumber('ALERT_VIDEO_CAPTURE_RETRY_INTERVAL_MS', 5000),
   alertVideoCaptureWaitTimeoutMs: getNumber('ALERT_VIDEO_CAPTURE_WAIT_TIMEOUT_MS', 180000),
+  alertVideoCaptureFallbackEnabled: getBoolean('ALERT_VIDEO_CAPTURE_FALLBACK_ENABLED', true),
+  alertVideoCaptureFallbackWindowMs: getNumber('ALERT_VIDEO_CAPTURE_FALLBACK_WINDOW_MS', 339000),
 }

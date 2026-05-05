@@ -1,6 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const config = require('./config')
+const { summarizeVehicleApproxCoverage } = require('./storage')
 
 const ALERT_CAPTURE_ROOT = path.join(process.cwd(), 'runtime', 'alert-captures')
 const ALERT_CAPTURE_JOB_ROOT = path.join(ALERT_CAPTURE_ROOT, 'jobs')
@@ -238,14 +239,9 @@ class AlertCaptureManager {
     let successCount = 0
 
     for (const channel of job.channels) {
-      try {
-        const exportResult = await this.exportController.exportVideo({
-          vehicleId: job.vehicleId,
-          channel,
-          from: fromIso,
-          to: toIso,
-          preRollMs: 0,
-        })
+      const exportAttempt = await this.exportWithFallback(job, channel, fromIso, toIso)
+      if (exportAttempt.success) {
+        const exportResult = exportAttempt.exportResult
         const materialized = this.materializeChannelArtifacts(job, channel, exportResult)
         successCount += 1
         results.push({
@@ -258,12 +254,17 @@ class AlertCaptureManager {
           exportFrom: exportResult.exportFrom,
           exportTo: exportResult.exportTo,
           transcodeError: exportResult.transcodeError,
+          fallbackUsed: !!exportAttempt.fallbackUsed,
+          fallbackWindow: exportAttempt.fallbackWindow || null,
           ...materialized,
         })
-      } catch (error) {
+      } else {
+        const error = exportAttempt.error
         results.push({
           channel,
           success: false,
+          fallbackUsed: !!exportAttempt.fallbackUsed,
+          fallbackWindow: exportAttempt.fallbackWindow || null,
           message: error.message || String(error),
         })
       }
@@ -350,6 +351,106 @@ class AlertCaptureManager {
     return {
       ...files,
       manifestUrl: `/media/alert-captures/${encodeURIComponent(job.alertId)}/ch${channel}/manifest.json`,
+    }
+  }
+
+  shouldAttemptFallbackCapture(error) {
+    const message = String(error?.message || error || '')
+    return /No packets found|No H264 payload/i.test(message)
+  }
+
+  resolveFallbackWindow(job, channel) {
+    if (!config.alertVideoCaptureFallbackEnabled) {
+      return null
+    }
+
+    const rows = summarizeVehicleApproxCoverage(job.vehicleId)
+    const channelCoverage = rows.find((row) => Number(row.channel) === Number(channel))
+    if (!channelCoverage) {
+      return null
+    }
+
+    const firstMs = Number(channelCoverage.approx_first_packet_timestamp_ms)
+    const lastMs = Number(channelCoverage.approx_last_packet_timestamp_ms)
+    if (!Number.isFinite(firstMs) || !Number.isFinite(lastMs) || lastMs <= firstMs) {
+      return null
+    }
+
+    const fallbackWindowMs = clampPositiveInt(
+      config.alertVideoCaptureFallbackWindowMs,
+      339000,
+    )
+    const fallbackToMs = lastMs
+    const fallbackFromMs = Math.max(firstMs, fallbackToMs - fallbackWindowMs)
+    if (fallbackToMs <= fallbackFromMs) {
+      return null
+    }
+
+    return {
+      fromIso: new Date(fallbackFromMs).toISOString(),
+      toIso: new Date(fallbackToMs).toISOString(),
+    }
+  }
+
+  async exportWithFallback(job, channel, fromIso, toIso) {
+    try {
+      const primaryResult = await this.exportController.exportVideo({
+        vehicleId: job.vehicleId,
+        channel,
+        from: fromIso,
+        to: toIso,
+        preRollMs: 0,
+      })
+      return {
+        success: true,
+        exportResult: primaryResult,
+        fallbackUsed: false,
+        fallbackWindow: null,
+      }
+    } catch (primaryError) {
+      if (!this.shouldAttemptFallbackCapture(primaryError)) {
+        return {
+          success: false,
+          error: primaryError,
+          fallbackUsed: false,
+          fallbackWindow: null,
+        }
+      }
+
+      const fallbackWindow = this.resolveFallbackWindow(job, channel)
+      if (!fallbackWindow) {
+        return {
+          success: false,
+          error: primaryError,
+          fallbackUsed: false,
+          fallbackWindow: null,
+        }
+      }
+
+      try {
+        const fallbackResult = await this.exportController.exportVideo({
+          vehicleId: job.vehicleId,
+          channel,
+          from: fallbackWindow.fromIso,
+          to: fallbackWindow.toIso,
+          preRollMs: 0,
+        })
+        return {
+          success: true,
+          exportResult: fallbackResult,
+          fallbackUsed: true,
+          fallbackWindow,
+        }
+      } catch (fallbackError) {
+        return {
+          success: false,
+          error: new Error(
+            `Primary capture failed: ${primaryError.message || String(primaryError)} | Fallback capture failed: ${fallbackError.message || String(fallbackError)}`,
+          ),
+          fallbackUsed: true,
+          fallbackWindow,
+        }
+      }
     }
   }
 }
