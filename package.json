@@ -10,7 +10,8 @@
     "start:api": "node api-server.js",
     "start:ingest": "node ingest-server.js",
     "start:worker": "node queue-worker.js",
-    "export:video": "node export-video.js"
+    "export:video": "node export-video.js",
+    "alerts:ensure-media": "node scripts/ensure-alert-media.js"
   },
   "author": "",
   "license": "MIT",

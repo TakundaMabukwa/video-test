@@ -46,9 +46,10 @@ Ingress-side live flow:
 
 Archive/storage flow remains separate:
 
-1. `video-feed-ingest` also publishes the same packets into JetStream.
-2. `video-feed-worker` consumes JetStream for durable storage/indexing.
-3. Queue backlog no longer drives the live preview path.
+1. `video-feed-ingest` writes packets to archive storage immediately as they arrive.
+2. `video-feed-ingest` also publishes the same packets into JetStream.
+3. `video-feed-worker` can consume JetStream for secondary processing without being the primary archive writer.
+4. Queue backlog no longer drives the live preview path.
 
 ### Endpoints
 
@@ -124,17 +125,29 @@ NATS_STREAM_NAME=VIDEO_PACKET_STREAM
 NATS_SUBJECT=video.packet
 NATS_CONSUMER_NAME=video-packet-writer
 QUEUE_WORKER_ENABLED=true
+ARCHIVE_WRITE_SOURCE=ingest
+RETENTION_DAYS=0
 ```
 
 Optional sizing/tuning:
 
 ```env
-NATS_STREAM_MAX_BYTES=53687091200
-NATS_STREAM_MAX_AGE_MS=259200000
+NATS_STREAM_MAX_BYTES=0
+NATS_STREAM_MAX_AGE_MS=0
+NATS_ACK_WAIT_MS=300000
 NATS_PUBLISH_TIMEOUT_MS=5000
 NATS_CONSUME_BATCH_SIZE=500
 NATS_CONSUMER_MAX_ACK_PENDING=20000
 ```
+
+Recommended for mandatory full archive retention:
+
+- `ARCHIVE_WRITE_SOURCE=ingest`
+- `RETENTION_DAYS=0`
+- `NATS_STREAM_MAX_BYTES=0`
+- `NATS_STREAM_MAX_AGE_MS=0`
+
+With those settings, archive packet files are written immediately on ingest and local retention cleanup is disabled.
 
 ### Process startup
 
@@ -163,3 +176,30 @@ Key fields:
 - `stats`: worker-side packet write stats.
 - `relayStats.enqueuedPackets`: packets durably published to JetStream.
 - `relayStats.queueDepthMessages`: buffered packets waiting for worker drain.
+
+## Ensure Alert MP4 + Links
+
+Use this when you need unresolved alerts to have evidence collection triggered and video-link status tracked.
+
+```bash
+npm run alerts:ensure-media
+```
+
+Optional flags:
+
+```bash
+node scripts/ensure-alert-media.js \
+  --base http://46.101.219.78:3100 \
+  --limit 100 \
+  --concurrency 4 \
+  --pollRounds 2 \
+  --pollDelayMs 15000 \
+  --requestReport true
+```
+
+What it does per unresolved alert:
+
+1. Triggers `POST /api/alerts/:id/collect-evidence`
+2. Polls `GET /api/alerts/:id/videos?ensureMedia=true`
+3. If no stored video links yet, triggers `POST /api/alerts/:id/request-report-video`
+4. Writes a JSON run report under `runtime/alert-captures/ensure-alert-media-*.json`

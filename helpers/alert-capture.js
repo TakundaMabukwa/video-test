@@ -98,6 +98,21 @@ class AlertCaptureManager {
     return [clampPositiveInt(fallbackChannel, 1)]
   }
 
+  mergeChannels(...channelLists) {
+    const merged = []
+    for (const list of channelLists) {
+      if (!Array.isArray(list)) {
+        continue
+      }
+      for (const channel of list) {
+        if (Number.isFinite(channel) && channel > 0) {
+          merged.push(Number(channel))
+        }
+      }
+    }
+    return [...new Set(merged)]
+  }
+
   normalizeRequest(input, existingJob = null) {
     const alertId = String(input?.alertId || existingJob?.alertId || '').trim()
     const vehicleId = String(input?.vehicleId || existingJob?.vehicleId || '').trim()
@@ -118,10 +133,15 @@ class AlertCaptureManager {
     )
 
     const channel = clampPositiveInt(input?.channel ?? existingJob?.channel, 1)
-    const channels = this.normalizeChannels(
+    const requestedChannels = this.normalizeChannels(
       input?.channels ?? existingJob?.channels,
       channel,
     )
+    const requiredChannels = this.normalizeChannels(
+      config.alertVideoCaptureChannels,
+      channel,
+    )
+    const channels = this.mergeChannels(requestedChannels, requiredChannels)
 
     return {
       alertId,

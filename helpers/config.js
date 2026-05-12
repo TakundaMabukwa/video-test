@@ -53,6 +53,21 @@ function getBoolean(name, fallback = false) {
   return fallback
 }
 
+function getPositiveIntList(name, fallback = []) {
+  const value = getString(name, '')
+  if (!value) {
+    return fallback
+  }
+
+  const values = value
+    .split(',')
+    .map((part) => Number(String(part).trim()))
+    .filter((part) => Number.isFinite(part) && part > 0)
+
+  const unique = [...new Set(values)]
+  return unique.length ? unique : fallback
+}
+
 function getLivePreviewSource() {
   const value = getString('LIVE_PREVIEW_SOURCE', 'ingest').toLowerCase()
   if (['ingest', 'worker', 'both', 'none'].includes(value)) {
@@ -143,6 +158,7 @@ module.exports = {
   alertVideoCaptureEnabled: getBoolean('ALERT_VIDEO_CAPTURE_ENABLED', true),
   alertVideoCapturePreRollMs: getNumber('ALERT_VIDEO_CAPTURE_PRE_ROLL_MS', 30000),
   alertVideoCapturePostRollMs: getNumber('ALERT_VIDEO_CAPTURE_POST_ROLL_MS', 30000),
+  alertVideoCaptureChannels: getPositiveIntList('ALERT_VIDEO_CAPTURE_CHANNELS', [1, 2]),
   alertVideoCaptureRetryIntervalMs: getNumber('ALERT_VIDEO_CAPTURE_RETRY_INTERVAL_MS', 5000),
   alertVideoCaptureWaitTimeoutMs: getNumber('ALERT_VIDEO_CAPTURE_WAIT_TIMEOUT_MS', 180000),
   alertVideoCaptureFallbackEnabled: getBoolean('ALERT_VIDEO_CAPTURE_FALLBACK_ENABLED', true),
