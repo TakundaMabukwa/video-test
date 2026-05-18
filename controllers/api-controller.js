@@ -178,6 +178,40 @@ class ApiController {
     }
   }
 
+  latestScreenshots = (req, res) => {
+    try {
+      const maxAgeMs = Number(req.query?.maxAgeMs || config.livePreviewMaxAgeMs)
+      const rows = listActivePreviewStreams({ maxAgeMs })
+      const results = rows.map((row) => {
+        const vehicleId = String(row?.vehicleId || '').trim()
+        const channel = Number(row?.channel || 0)
+        return {
+          vehicleId,
+          channel,
+          ok: Boolean(vehicleId && Number.isFinite(channel) && channel > 0),
+          source: String(row?.source || 'ingest'),
+          updatedAt: row?.updatedAt || null,
+          updatedAtMs: Number(row?.updatedAtMs || 0),
+          fileUrl:
+            vehicleId && Number.isFinite(channel) && channel > 0
+              ? `/api/vehicles/${encodeURIComponent(vehicleId)}/screenshot?channel=${channel}`
+              : null,
+        }
+      })
+
+      return res.status(200).json({
+        success: true,
+        count: results.length,
+        results,
+      })
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: error.message || String(error),
+      })
+    }
+  }
+
   activeLiveHlsStreams = (req, res) => {
     try {
       const maxAgeMs = Number(req.query?.maxAgeMs || config.liveHlsMaxAgeMs)

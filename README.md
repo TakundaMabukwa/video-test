@@ -99,6 +99,25 @@ LIVE_PREVIEW_MAX_AGE_MS=15000
 
 This path is meant for reliable live dashboard previews and screenshot capture. It does not replace full archive export.
 
+### Listener websocket ingest mode
+
+You can ingest directly from listener `/ws/raw` instead of only relying on relay TCP:
+
+```env
+INGEST_SOURCE_MODE=ws
+SOURCE_WS_URL=ws://127.0.0.1:3000/ws/raw
+SOURCE_WS_RECONNECT_MS=3000
+SOURCE_WS_PING_INTERVAL_MS=30000
+SOURCE_WS_PONG_TIMEOUT_MS=10000
+SOURCE_WS_MAX_BODY_LENGTH=1048576
+```
+
+Modes:
+
+- `relay`: relay TCP only (`RELAY_HOST` / `RELAY_PORT`)
+- `ws`: websocket only (`SOURCE_WS_URL`)
+- `both`: ingest from both sources in parallel
+
 ## Durable Packet Buffer (JetStream)
 
 This project now uses a durable middle layer:

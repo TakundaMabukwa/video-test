@@ -1,45 +1,103 @@
 const net = require('net')
+const WebSocket = require('ws')
 const config = require('./helpers/config')
 const { createPacketQueue } = require('./helpers/packet-queue')
 const { writeIngestRelayStats } = require('./helpers/runtime-state')
 const { createLivePreviewManager } = require('./helpers/live-preview')
 const { createLiveHlsManager } = require('./helpers/live-hls')
 const { appendPacket, closeStorageStreams } = require('./helpers/storage')
+const { parsePacket, extractPackets } = require('./helpers/jt1078')
 
-const HOST = config.relayHost
-const PORT = config.relayPort
+const RELAY_HOST = config.relayHost
+const RELAY_PORT = config.relayPort
+const SOURCE_WS_URL = String(config.sourceWsUrl || '').trim()
 const RECONNECT_BASE_DELAY_MS = 1000
 const RECONNECT_MAX_DELAY_MS = 30000
 const RECONNECT_JITTER_MS = 250
 const MAX_INFLIGHT_PUBLISH = 10000
 const RESUME_INFLIGHT_PUBLISH = 3000
 
+function decodePayload(payload, encoding) {
+  if (typeof payload !== 'string' || !payload.length) {
+    return null
+  }
+
+  const normalizedEncoding = String(encoding || 'base64').trim().toLowerCase()
+  if (normalizedEncoding === 'hex') {
+    const compact = payload.replace(/\s+/g, '')
+    if (compact.length % 2 !== 0) {
+      return null
+    }
+    try {
+      return Buffer.from(compact, 'hex')
+    } catch {
+      return null
+    }
+  }
+
+  const compact = payload.replace(/\s+/g, '')
+  try {
+    const decoded = Buffer.from(compact, 'base64')
+    return decoded.length ? decoded : null
+  } catch {
+    return null
+  }
+}
+
 async function start() {
-  if (!config.relayIngestEnabled) {
-    console.log('Ingest startup: relay ingest disabled by RELAY_INGEST_ENABLED=false')
+  const ingestFromRelay = !!config.relayIngestEnabled
+  const ingestFromWs = !!config.sourceWsEnabled && !!SOURCE_WS_URL
+  if (!ingestFromRelay && !ingestFromWs) {
+    console.log(
+      'Ingest startup: no input source enabled (set INGEST_SOURCE_MODE=relay|ws|both)',
+    )
     writeIngestRelayStats({
-      relayHost: HOST,
-      relayPort: PORT,
+      ingestSourceMode: config.ingestSourceMode,
+      relayHost: RELAY_HOST,
+      relayPort: RELAY_PORT,
+      sourceWsEnabled: false,
+      sourceWsUrl: SOURCE_WS_URL || null,
       relayIngestEnabled: false,
       receivedPackets: 0,
       receivedBytes: 0,
+      relayReceivedPackets: 0,
+      relayReceivedBytes: 0,
+      wsReceivedPackets: 0,
+      wsReceivedBytes: 0,
+      wsMessages: 0,
+      wsBinaryMessages: 0,
+      wsTextMessages: 0,
       enqueuedPackets: 0,
       enqueueErrors: 0,
       droppedPackets: 0,
       archivedPackets: 0,
       archiveWriteErrors: 0,
       metadataParseErrors: 0,
+      wsParseErrors: 0,
+      wsDroppedBytes: 0,
       inflightPublishes: 0,
       pausedForBackpressure: false,
       relayReconnectAttempt: 0,
+      wsReconnectAttempt: 0,
+      wsConnects: 0,
       queueDepthMessages: null,
       lastQueueInfoError: null,
       lastRelayConnectAt: null,
       lastRelayDisconnectAt: null,
       lastRelayError: null,
+      lastWsConnectAt: null,
+      lastWsDisconnectAt: null,
+      lastWsError: null,
       lastEnqueueError: null,
       lastArchiveError: null,
       lastEnqueueAckSequence: null,
+      lastPacketVehicleId: null,
+      lastPacketChannel: null,
+      lastPacketTimestampMs: null,
+      lastPacketDeviceTimestampMs: null,
+      lastPacketTransport: null,
+      lastPacketSource: null,
+      lastPacketAt: null,
     })
 
     let keepAliveTimer = setInterval(() => {}, 60 * 60 * 1000)
@@ -57,13 +115,22 @@ async function start() {
     return
   }
 
-  console.log('Ingest startup: queue-first mode ready')
-  console.log('Ingest startup: connecting to JetStream...')
-
-  const packetQueue = await createPacketQueue({ role: 'ingest' })
-  await packetQueue.ensureStream()
-  await packetQueue.ensureConsumer()
-  console.log('Ingest startup: JetStream ready')
+  const queueEnabled = !!config.queueWorkerEnabled
+  let packetQueue = null
+  if (queueEnabled) {
+    console.log(
+      `Ingest startup: queue-first mode ready (sources: relay=${ingestFromRelay}, ws=${ingestFromWs})`,
+    )
+    console.log('Ingest startup: connecting to JetStream...')
+    packetQueue = await createPacketQueue({ role: 'ingest' })
+    await packetQueue.ensureStream()
+    await packetQueue.ensureConsumer()
+    console.log('Ingest startup: JetStream ready')
+  } else {
+    console.log(
+      `Ingest startup: queue disabled (QUEUE_WORKER_ENABLED=false); running archive/live only (sources: relay=${ingestFromRelay}, ws=${ingestFromWs})`,
+    )
+  }
   const livePreviewManager = config.livePreviewFromIngest
     ? createLivePreviewManager({ source: 'ingest' })
     : {
@@ -72,54 +139,108 @@ async function start() {
       }
   const liveHlsManager = createLiveHlsManager({ source: 'ingest' })
 
-  let buffer = Buffer.alloc(0)
   let shuttingDown = false
-  let reconnectAttempt = 0
-  let reconnectTimer = null
-  let client = null
+
+  let relayBuffer = Buffer.alloc(0)
+  let relayReconnectAttempt = 0
+  let relayReconnectTimer = null
+  let relayClient = null
+
+  let wsCarryBuffer = Buffer.alloc(0)
+  let wsReconnectAttempt = 0
+  let wsReconnectTimer = null
+  let wsClient = null
+  let wsPingTimer = null
+  let wsPongTimer = null
+  let wsPendingPong = false
+
   let inflightPublishes = 0
-  let pausedForBackpressure = false
+  let relayPausedForBackpressure = false
   let statsRefreshInProgress = false
 
   const relayStats = {
-    relayHost: HOST,
-    relayPort: PORT,
+    ingestSourceMode: config.ingestSourceMode,
+    relayHost: RELAY_HOST,
+    relayPort: RELAY_PORT,
+    sourceWsEnabled: ingestFromWs,
+    sourceWsUrl: ingestFromWs ? SOURCE_WS_URL : null,
     natsUrl: config.natsUrl,
     natsStreamName: config.natsStreamName,
     natsSubject: config.natsSubject,
     receivedPackets: 0,
     receivedBytes: 0,
+    relayReceivedPackets: 0,
+    relayReceivedBytes: 0,
+    wsReceivedPackets: 0,
+    wsReceivedBytes: 0,
+    wsMessages: 0,
+    wsBinaryMessages: 0,
+    wsTextMessages: 0,
+    wsConnects: 0,
     enqueuedPackets: 0,
     enqueueErrors: 0,
     droppedPackets: 0,
     archivedPackets: 0,
     archiveWriteErrors: 0,
     metadataParseErrors: 0,
+    wsParseErrors: 0,
+    wsDroppedBytes: 0,
     inflightPublishes: 0,
     pausedForBackpressure: false,
     relayReconnectAttempt: 0,
+    wsReconnectAttempt: 0,
     queueDepthMessages: null,
     lastQueueInfoError: null,
     lastRelayConnectAt: null,
     lastRelayDisconnectAt: null,
     lastRelayError: null,
+    lastWsConnectAt: null,
+    lastWsDisconnectAt: null,
+    lastWsError: null,
     lastEnqueueError: null,
     lastArchiveError: null,
     lastEnqueueAckSequence: null,
+    lastPacketVehicleId: null,
+    lastPacketChannel: null,
+    lastPacketTimestampMs: null,
+    lastPacketDeviceTimestampMs: null,
+    lastPacketTransport: null,
+    lastPacketSource: null,
+    lastPacketAt: null,
   }
 
-  const clearReconnectTimer = () => {
-    if (!reconnectTimer) {
+  const clearRelayReconnectTimer = () => {
+    if (!relayReconnectTimer) {
       return
     }
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
+    clearTimeout(relayReconnectTimer)
+    relayReconnectTimer = null
   }
 
-  const getReconnectDelayMs = () => {
+  const clearWsReconnectTimer = () => {
+    if (!wsReconnectTimer) {
+      return
+    }
+    clearTimeout(wsReconnectTimer)
+    wsReconnectTimer = null
+  }
+
+  const clearWsHeartbeatTimers = () => {
+    if (wsPingTimer) {
+      clearInterval(wsPingTimer)
+      wsPingTimer = null
+    }
+    if (wsPongTimer) {
+      clearTimeout(wsPongTimer)
+      wsPongTimer = null
+    }
+    wsPendingPong = false
+  }
+
+  const getReconnectDelayMs = (attempt) => {
     const exponential = Math.min(
       RECONNECT_MAX_DELAY_MS,
-      RECONNECT_BASE_DELAY_MS * 2 ** Math.min(reconnectAttempt, 8),
+      RECONNECT_BASE_DELAY_MS * 2 ** Math.min(attempt, 8),
     )
     const jitter = Math.floor(Math.random() * RECONNECT_JITTER_MS)
     return exponential + jitter
@@ -129,9 +250,14 @@ async function start() {
     if (refreshQueueDepth && !statsRefreshInProgress) {
       statsRefreshInProgress = true
       try {
-        const info = await packetQueue.getStreamInfo()
-        relayStats.queueDepthMessages = Number(info?.state?.messages ?? 0)
-        relayStats.lastQueueInfoError = null
+        if (!packetQueue) {
+          relayStats.queueDepthMessages = null
+          relayStats.lastQueueInfoError = null
+        } else {
+          const info = await packetQueue.getStreamInfo()
+          relayStats.queueDepthMessages = Number(info?.state?.messages ?? 0)
+          relayStats.lastQueueInfoError = null
+        }
       } catch (error) {
         relayStats.lastQueueInfoError = error.message || String(error)
       } finally {
@@ -140,8 +266,9 @@ async function start() {
     }
 
     relayStats.inflightPublishes = inflightPublishes
-    relayStats.pausedForBackpressure = pausedForBackpressure
-    relayStats.relayReconnectAttempt = reconnectAttempt
+    relayStats.pausedForBackpressure = relayPausedForBackpressure
+    relayStats.relayReconnectAttempt = relayReconnectAttempt
+    relayStats.wsReconnectAttempt = wsReconnectAttempt
 
     try {
       writeIngestRelayStats(relayStats)
@@ -151,34 +278,52 @@ async function start() {
   }
 
   const resumeIfBackpressureCleared = () => {
-    if (!client || client.destroyed || !pausedForBackpressure) {
+    if (!relayClient || relayClient.destroyed || !relayPausedForBackpressure) {
       return
     }
     if (inflightPublishes > RESUME_INFLIGHT_PUBLISH) {
       return
     }
 
-    pausedForBackpressure = false
+    relayPausedForBackpressure = false
     try {
-      client.resume()
+      relayClient.resume()
     } catch {}
   }
 
-  const scheduleReconnect = (reason = 'socket-closed') => {
-    if (shuttingDown || reconnectTimer) {
+  const scheduleRelayReconnect = (reason = 'socket-closed') => {
+    if (shuttingDown || relayReconnectTimer || !ingestFromRelay) {
       return
     }
 
-    reconnectAttempt += 1
+    relayReconnectAttempt += 1
     relayStats.lastRelayDisconnectAt = new Date().toISOString()
-    const delayMs = getReconnectDelayMs()
+    const delayMs = getReconnectDelayMs(relayReconnectAttempt)
     console.warn(
-      `Relay connection dropped (${reason}). Reconnecting in ${delayMs}ms (attempt ${reconnectAttempt})...`,
+      `Relay connection dropped (${reason}). Reconnecting in ${delayMs}ms (attempt ${relayReconnectAttempt})...`,
     )
 
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null
+    relayReconnectTimer = setTimeout(() => {
+      relayReconnectTimer = null
       connectToRelay()
+    }, delayMs)
+  }
+
+  const scheduleWsReconnect = (reason = 'socket-closed') => {
+    if (shuttingDown || wsReconnectTimer || !ingestFromWs) {
+      return
+    }
+
+    wsReconnectAttempt += 1
+    relayStats.lastWsDisconnectAt = new Date().toISOString()
+    const delayMs = getReconnectDelayMs(wsReconnectAttempt)
+    console.warn(
+      `Listener websocket dropped (${reason}). Reconnecting in ${delayMs}ms (attempt ${wsReconnectAttempt})...`,
+    )
+
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null
+      connectToSourceWs()
     }, delayMs)
   }
 
@@ -191,17 +336,21 @@ async function start() {
   }
 
   const queuePacket = (meta, payloadBuffer) => {
+    if (!queueEnabled || !packetQueue) {
+      return
+    }
+
     inflightPublishes += 1
 
     if (
-      client &&
-      !client.destroyed &&
-      !pausedForBackpressure &&
+      relayClient &&
+      !relayClient.destroyed &&
+      !relayPausedForBackpressure &&
       inflightPublishes >= MAX_INFLIGHT_PUBLISH
     ) {
-      pausedForBackpressure = true
+      relayPausedForBackpressure = true
       try {
-        client.pause()
+        relayClient.pause()
       } catch {}
       console.warn(
         `Backpressure engaged: inflight queue publishes reached ${inflightPublishes}`,
@@ -252,97 +401,298 @@ async function start() {
     }
   }
 
-  const handleData = (chunk) => {
-    buffer = Buffer.concat([buffer, chunk])
+  const handleLiveOutputs = (meta, payloadBuffer) => {
+    try {
+      livePreviewManager.handlePacket(meta, payloadBuffer)
+    } catch (error) {
+      console.error(
+        'Ingest live preview pipeline failed:',
+        error?.message || String(error),
+      )
+    }
+    try {
+      liveHlsManager.handlePacket(meta, payloadBuffer)
+    } catch (error) {
+      console.error(
+        'Ingest live HLS pipeline failed:',
+        error?.message || String(error),
+      )
+    }
+  }
 
-    while (buffer.length >= 8) {
-      const metaLength = buffer.readUInt32BE(0)
-      const payloadLength = buffer.readUInt32BE(4)
+  const processPacket = (meta, payloadBuffer, sourceType) => {
+    relayStats.receivedPackets += 1
+    relayStats.receivedBytes += payloadBuffer.length
+    if (sourceType === 'relay') {
+      relayStats.relayReceivedPackets += 1
+      relayStats.relayReceivedBytes += payloadBuffer.length
+    } else if (sourceType === 'ws') {
+      relayStats.wsReceivedPackets += 1
+      relayStats.wsReceivedBytes += payloadBuffer.length
+    }
+
+    relayStats.lastPacketVehicleId = String(meta?.vehicleId || '')
+    relayStats.lastPacketChannel = Number(meta?.channel || 0)
+    relayStats.lastPacketTimestampMs = Number(
+      meta?.archiveTimestampMs ?? meta?.receivedAtMs ?? meta?.timestamp ?? Date.now(),
+    )
+    relayStats.lastPacketDeviceTimestampMs = Number(
+      meta?.deviceTimestampMs ?? meta?.timestamp ?? 0,
+    )
+    relayStats.lastPacketTransport = String(meta?.transport || 'tcp')
+    relayStats.lastPacketSource = String(meta?.source || sourceType)
+    relayStats.lastPacketAt = new Date().toISOString()
+
+    archivePacket(meta, payloadBuffer)
+    handleLiveOutputs(meta, payloadBuffer)
+    queuePacket(meta, payloadBuffer)
+  }
+
+  const handleRelayData = (chunk) => {
+    relayBuffer = Buffer.concat([relayBuffer, chunk])
+
+    while (relayBuffer.length >= 8) {
+      const metaLength = relayBuffer.readUInt32BE(0)
+      const payloadLength = relayBuffer.readUInt32BE(4)
       const totalLength = 8 + metaLength + payloadLength
 
-      if (buffer.length < totalLength) {
+      if (relayBuffer.length < totalLength) {
         return
       }
 
-      const metaBuffer = buffer.slice(8, 8 + metaLength)
+      const metaBuffer = relayBuffer.slice(8, 8 + metaLength)
       const payloadStart = 8 + metaLength
-      const payloadBuffer = buffer.slice(payloadStart, totalLength)
-      relayStats.receivedPackets += 1
-      relayStats.receivedBytes += payloadBuffer.length
+      const payloadBuffer = relayBuffer.slice(payloadStart, totalLength)
 
       try {
         const meta = JSON.parse(metaBuffer.toString('utf8'))
-        archivePacket(meta, payloadBuffer)
-        try {
-          livePreviewManager.handlePacket(meta, payloadBuffer)
-        } catch (error) {
-          console.error(
-            'Ingest live preview pipeline failed:',
-            error?.message || String(error),
-          )
-        }
-        try {
-          liveHlsManager.handlePacket(meta, payloadBuffer)
-        } catch (error) {
-          console.error(
-            'Ingest live HLS pipeline failed:',
-            error?.message || String(error),
-          )
-        }
-        queuePacket(meta, payloadBuffer)
+        processPacket(meta, payloadBuffer, 'relay')
       } catch (error) {
         relayStats.metadataParseErrors += 1
         recordDrop('metadata-parse-failed', error)
       }
 
-      buffer = buffer.slice(totalLength)
+      relayBuffer = relayBuffer.slice(totalLength)
     }
   }
 
-  const connectToRelay = () => {
-    if (shuttingDown) {
-      return
-    }
-    if (client && !client.destroyed) {
+  const handleWsPacketBuffer = (packetBuffer, transport = 'tcp') => {
+    const parsed = parsePacket(packetBuffer)
+    if (!parsed) {
+      relayStats.wsParseErrors += 1
+      recordDrop('ws-invalid-jt1078-packet')
       return
     }
 
-    clearReconnectTimer()
-    buffer = Buffer.alloc(0)
+    const nowMs = Date.now()
+    const deviceTs = Number(parsed.timestamp)
+    const meta = {
+      vehicleId: String(parsed.sim || '').trim(),
+      channel: Number(parsed.channel || 0),
+      timestamp: nowMs,
+      deviceTimestampMs: Number.isFinite(deviceTs) && deviceTs > 0 ? deviceTs : null,
+      receivedAtMs: nowMs,
+      archiveTimestampMs: nowMs,
+      transport: transport === 'udp' ? 'udp' : 'tcp',
+      source: 'listener-ws',
+    }
 
-    console.log(`Ingest startup: connecting to relay ${HOST}:${PORT}...`)
+    if (!meta.vehicleId || !meta.channel) {
+      relayStats.wsParseErrors += 1
+      recordDrop('ws-missing-vehicle-or-channel')
+      return
+    }
+
+    processPacket(meta, packetBuffer, 'ws')
+  }
+
+  const handleWsPayloadBuffer = (payloadBuffer, transport = 'tcp') => {
+    if (!Buffer.isBuffer(payloadBuffer) || !payloadBuffer.length) {
+      return
+    }
+
+    const extracted = extractPackets(payloadBuffer, wsCarryBuffer, {
+      maxBodyLength: config.sourceWsMaxBodyLength,
+    })
+    wsCarryBuffer = extracted.remainder
+    relayStats.wsDroppedBytes += Number(extracted.droppedBytes || 0)
+    relayStats.wsParseErrors += Number(extracted.parseErrors || 0)
+
+    for (const packetBuffer of extracted.packets) {
+      handleWsPacketBuffer(packetBuffer, transport)
+    }
+  }
+
+  const handleWsTextMessage = (text) => {
+    let parsed = null
     try {
-      client = net.createConnection({ host: HOST, port: PORT })
+      parsed = JSON.parse(text)
+    } catch {
+      parsed = null
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return
+    }
+
+    const decoded =
+      decodePayload(parsed.chunk, parsed.encoding) ||
+      decodePayload(parsed.payload, parsed.encoding) ||
+      decodePayload(parsed.data, parsed.encoding)
+    if (!decoded) {
+      return
+    }
+
+    const transport = parsed.transport === 'udp' ? 'udp' : 'tcp'
+    handleWsPayloadBuffer(decoded, transport)
+  }
+
+  const connectToRelay = () => {
+    if (shuttingDown || !ingestFromRelay) {
+      return
+    }
+    if (relayClient && !relayClient.destroyed) {
+      return
+    }
+
+    clearRelayReconnectTimer()
+    relayBuffer = Buffer.alloc(0)
+
+    console.log(`Ingest startup: connecting to relay ${RELAY_HOST}:${RELAY_PORT}...`)
+    try {
+      relayClient = net.createConnection({ host: RELAY_HOST, port: RELAY_PORT })
     } catch (error) {
       relayStats.lastRelayError = error.message || String(error)
       console.error('TCP connect setup error:', relayStats.lastRelayError)
-      client = null
-      scheduleReconnect('connect-setup-failed')
+      relayClient = null
+      scheduleRelayReconnect('connect-setup-failed')
       return
     }
 
-    client.on('connect', () => {
-      reconnectAttempt = 0
+    relayClient.on('connect', () => {
+      relayReconnectAttempt = 0
       relayStats.lastRelayConnectAt = new Date().toISOString()
       relayStats.lastRelayError = null
-      console.log(`Connected to ${HOST}:${PORT}`)
+      console.log(`Connected to ${RELAY_HOST}:${RELAY_PORT}`)
     })
 
-    client.on('data', handleData)
+    relayClient.on('data', handleRelayData)
 
-    client.on('error', (error) => {
+    relayClient.on('error', (error) => {
       relayStats.lastRelayError = error.message || String(error)
       console.error('TCP error:', relayStats.lastRelayError)
     })
 
-    client.on('close', (hadError) => {
-      client = null
-      buffer = Buffer.alloc(0)
-      pausedForBackpressure = false
+    relayClient.on('close', (hadError) => {
+      relayClient = null
+      relayBuffer = Buffer.alloc(0)
+      relayPausedForBackpressure = false
       if (shuttingDown) {
         return
       }
-      scheduleReconnect(hadError ? 'socket-error' : 'socket-closed')
+      scheduleRelayReconnect(hadError ? 'socket-error' : 'socket-closed')
+    })
+  }
+
+  const startWsHeartbeat = () => {
+    clearWsHeartbeatTimers()
+    wsPendingPong = false
+    wsPingTimer = setInterval(() => {
+      if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+        return
+      }
+      if (wsPendingPong) {
+        relayStats.lastWsError = 'pong-timeout'
+        try {
+          wsClient.terminate()
+        } catch {}
+        return
+      }
+
+      wsPendingPong = true
+      try {
+        wsClient.ping()
+      } catch {
+        return
+      }
+      wsPongTimer = setTimeout(() => {
+        if (wsPendingPong && wsClient && wsClient.readyState === WebSocket.OPEN) {
+          relayStats.lastWsError = 'pong-timeout'
+          try {
+            wsClient.terminate()
+          } catch {}
+        }
+      }, Math.max(1000, Number(config.sourceWsPongTimeoutMs || 10000)))
+    }, Math.max(5000, Number(config.sourceWsPingIntervalMs || 30000)))
+    wsPingTimer.unref()
+  }
+
+  const connectToSourceWs = () => {
+    if (shuttingDown || !ingestFromWs) {
+      return
+    }
+    if (wsClient && (wsClient.readyState === WebSocket.OPEN || wsClient.readyState === WebSocket.CONNECTING)) {
+      return
+    }
+
+    clearWsReconnectTimer()
+    wsCarryBuffer = Buffer.alloc(0)
+
+    console.log(`Ingest startup: connecting to listener websocket ${SOURCE_WS_URL}...`)
+    wsClient = new WebSocket(SOURCE_WS_URL, {
+      perMessageDeflate: false,
+      handshakeTimeout: Math.max(5000, Number(config.sourceWsPongTimeoutMs || 10000)),
+    })
+
+    wsClient.on('open', () => {
+      wsReconnectAttempt = 0
+      relayStats.wsConnects += 1
+      relayStats.lastWsConnectAt = new Date().toISOString()
+      relayStats.lastWsError = null
+      console.log(`Connected to websocket source ${SOURCE_WS_URL}`)
+      startWsHeartbeat()
+    })
+
+    wsClient.on('pong', () => {
+      wsPendingPong = false
+      if (wsPongTimer) {
+        clearTimeout(wsPongTimer)
+        wsPongTimer = null
+      }
+    })
+
+    wsClient.on('message', (data, isBinary) => {
+      relayStats.wsMessages += 1
+      if (isBinary) {
+        relayStats.wsBinaryMessages += 1
+      } else {
+        relayStats.wsTextMessages += 1
+      }
+
+      if (isBinary) {
+        const payloadBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
+        handleWsPayloadBuffer(payloadBuffer, 'tcp')
+        return
+      }
+
+      const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
+      handleWsTextMessage(text)
+    })
+
+    wsClient.on('error', (error) => {
+      relayStats.lastWsError = error?.message || String(error)
+      console.error('Source websocket error:', relayStats.lastWsError)
+    })
+
+    wsClient.on('close', () => {
+      clearWsHeartbeatTimers()
+      relayStats.lastWsDisconnectAt = new Date().toISOString()
+      wsClient = null
+      wsCarryBuffer = Buffer.alloc(0)
+      if (shuttingDown) {
+        return
+      }
+      scheduleWsReconnect('socket-closed')
     })
   }
 
@@ -352,7 +702,12 @@ async function start() {
   statsTimer.unref()
 
   await persistRelayStats({ refreshQueueDepth: true })
-  connectToRelay()
+  if (ingestFromRelay) {
+    connectToRelay()
+  }
+  if (ingestFromWs) {
+    connectToSourceWs()
+  }
 
   const shutdown = async (reason = 'Ingest shutting down...', exitCode = 0) => {
     if (shuttingDown) {
@@ -360,12 +715,20 @@ async function start() {
     }
     shuttingDown = true
     console.log(reason)
-    clearReconnectTimer()
+    clearRelayReconnectTimer()
+    clearWsReconnectTimer()
+    clearWsHeartbeatTimers()
     clearInterval(statsTimer)
 
     try {
-      if (client && !client.destroyed) {
-        client.destroy()
+      if (relayClient && !relayClient.destroyed) {
+        relayClient.destroy()
+      }
+    } catch {}
+
+    try {
+      if (wsClient) {
+        wsClient.close()
       }
     } catch {}
 
@@ -397,7 +760,9 @@ async function start() {
     }
 
     try {
-      await packetQueue.close()
+      if (packetQueue) {
+        await packetQueue.close()
+      }
     } catch (error) {
       console.error('Queue shutdown failed:', error.message || String(error))
     }

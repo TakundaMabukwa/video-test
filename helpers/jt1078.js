@@ -1,5 +1,6 @@
 const JT1078_MAGIC = 0x30316364
 const HEADER_LENGTH = 30
+const JT1078_MAGIC_BYTES = Buffer.from([0x30, 0x31, 0x63, 0x64])
 
 function findAnnexBStart(buffer, fromIndex = 0) {
   for (let i = fromIndex; i <= buffer.length - 4; i += 1) {
@@ -248,6 +249,63 @@ function createFrameAssembler() {
   }
 }
 
+function extractPackets(inputBuffer, carryBuffer = Buffer.alloc(0), options = {}) {
+  const maxBodyLength = Number(options.maxBodyLength || 0) > 0
+    ? Number(options.maxBodyLength)
+    : 1048576
+
+  let buffer =
+    Buffer.isBuffer(carryBuffer) && carryBuffer.length
+      ? Buffer.concat([carryBuffer, inputBuffer])
+      : inputBuffer
+
+  const packets = []
+  let droppedBytes = 0
+  let parseErrors = 0
+
+  while (Buffer.isBuffer(buffer) && buffer.length >= HEADER_LENGTH) {
+    const magicOffset = buffer.indexOf(JT1078_MAGIC_BYTES)
+    if (magicOffset === -1) {
+      const keepTailLength = Math.min(buffer.length, JT1078_MAGIC_BYTES.length - 1)
+      droppedBytes += Math.max(0, buffer.length - keepTailLength)
+      buffer = buffer.subarray(Math.max(0, buffer.length - keepTailLength))
+      break
+    }
+
+    if (magicOffset > 0) {
+      droppedBytes += magicOffset
+      buffer = buffer.subarray(magicOffset)
+    }
+
+    if (buffer.length < HEADER_LENGTH) {
+      break
+    }
+
+    const bodyLength = buffer.readUInt16BE(28)
+    if (bodyLength <= 0 || bodyLength > maxBodyLength) {
+      parseErrors += 1
+      droppedBytes += 1
+      buffer = buffer.subarray(1)
+      continue
+    }
+
+    const fullLength = HEADER_LENGTH + bodyLength
+    if (buffer.length < fullLength) {
+      break
+    }
+
+    packets.push(buffer.subarray(0, fullLength))
+    buffer = buffer.subarray(fullLength)
+  }
+
+  return {
+    packets,
+    remainder: Buffer.isBuffer(buffer) ? buffer : Buffer.alloc(0),
+    droppedBytes,
+    parseErrors,
+  }
+}
+
 function isKeyFrameBuffer(frameBuffer) {
   if (!frameBuffer?.length || !findAnnexBStart(frameBuffer)) {
     return false
@@ -306,7 +364,10 @@ function isDecodableSyncFrameBuffer(frameBuffer) {
 }
 
 module.exports = {
+  JT1078_MAGIC,
+  HEADER_LENGTH,
   parsePacket,
+  extractPackets,
   createFrameAssembler,
   findAnnexBStart,
   splitAnnexBNals,

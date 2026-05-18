@@ -84,13 +84,33 @@ function getArchiveWriteSource() {
   return 'ingest'
 }
 
+function getIngestSourceMode() {
+  const value = getString('INGEST_SOURCE_MODE', 'relay').toLowerCase()
+  if (['relay', 'ws', 'both'].includes(value)) {
+    return value
+  }
+  return 'relay'
+}
+
 const livePreviewSource = getLivePreviewSource()
 const archiveWriteSource = getArchiveWriteSource()
+const ingestSourceMode = getIngestSourceMode()
 
 module.exports = {
+  screenshotOnlyMode: getBoolean('SCREENSHOT_ONLY_MODE', false),
   relayHost: getString('RELAY_HOST', '209.38.206.44'),
   relayPort: getNumber('RELAY_PORT', 7081),
-  relayIngestEnabled: getBoolean('RELAY_INGEST_ENABLED', true),
+  relayIngestEnabled:
+    getBoolean('RELAY_INGEST_ENABLED', true) &&
+    (ingestSourceMode === 'relay' || ingestSourceMode === 'both'),
+  ingestSourceMode,
+  sourceWsEnabled:
+    ingestSourceMode === 'ws' || ingestSourceMode === 'both',
+  sourceWsUrl: getString('SOURCE_WS_URL', 'ws://127.0.0.1:3000/ws/raw'),
+  sourceWsReconnectMs: getNumber('SOURCE_WS_RECONNECT_MS', 3000),
+  sourceWsPingIntervalMs: getNumber('SOURCE_WS_PING_INTERVAL_MS', 30000),
+  sourceWsPongTimeoutMs: getNumber('SOURCE_WS_PONG_TIMEOUT_MS', 10000),
+  sourceWsMaxBodyLength: getNumber('SOURCE_WS_MAX_BODY_LENGTH', 1048576),
   apiPort: getNumber('API_PORT', 3201),
   internalWorkerToken: getString('INTERNAL_WORKER_TOKEN', ''),
   dbHost: getString('DB_HOST', '127.0.0.1'),
